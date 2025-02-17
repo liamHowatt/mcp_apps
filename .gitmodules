@@ -1,0 +1,3 @@
+[submodule "mcp_forth/mcp_forth"]
+	path = mcp_forth/mcp_forth
+	url = https://github.com/liamHowatt/mcp_forth.git

@@ -1,0 +1,1 @@
+include $(wildcard $(APPDIR)/mcp_apps/*/Make.defs)

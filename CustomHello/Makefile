@@ -1,0 +1,14 @@
+include $(APPDIR)/Make.defs
+
+# Custom Hello built-in application info
+
+PROGNAME = $(CONFIG_MCP_APPS_CUSTOM_HELLO_PROGNAME)
+PRIORITY = $(CONFIG_MCP_APPS_CUSTOM_HELLO_PRIORITY)
+STACKSIZE = $(CONFIG_MCP_APPS_CUSTOM_HELLO_STACKSIZE)
+MODULE = $(CONFIG_MCP_APPS_CUSTOM_HELLO)
+
+# Custom Hello
+
+MAINSRC = CustomHello.c
+
+include $(APPDIR)/Application.mk

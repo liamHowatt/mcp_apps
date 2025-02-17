@@ -1,0 +1,3 @@
+ifneq ($(CONFIG_MCP_APPS_MCP_FORTH),)
+CONFIGURED_APPS += $(APPDIR)/mcp_apps/mcp_forth
+endif

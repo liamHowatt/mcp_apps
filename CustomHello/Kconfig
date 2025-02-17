@@ -1,0 +1,29 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config MCP_APPS_CUSTOM_HELLO
+        tristate "Custom Hello App"
+        default n
+        ---help---
+                Enable the Custom Hello App
+
+if MCP_APPS_CUSTOM_HELLO
+
+config MCP_APPS_CUSTOM_HELLO_PROGNAME
+        string "Program name"
+        default "custom_hello"
+        ---help---
+                This is the name of the program that will be used when the NSH ELF
+                program is installed.
+
+config MCP_APPS_CUSTOM_HELLO_PRIORITY
+        int "Custom Hello task priority"
+        default 100
+
+config MCP_APPS_CUSTOM_HELLO_STACKSIZE
+        int "Custom Hello stack size"
+        default DEFAULT_TASK_STACKSIZE
+
+endif
