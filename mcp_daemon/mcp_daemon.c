@@ -131,9 +131,6 @@ static void run_transfer(pin_socket_ctx_t * ctx)
             case MBB_CLI_STATUS_DO_DELAY:
                 timer_sleep(ctx);
                 break;
-            case MBB_CLI_STATUS_DO_DELAY_AND_WAIT_CLK_PIN_HIGH:
-                timer_sleep(ctx);
-                /* fallthrough */
             case MBB_CLI_STATUS_WAIT_CLK_PIN_HIGH:
                 pin_wait(ctx, MBB_CLI_PIN_CLK);
                 break;
