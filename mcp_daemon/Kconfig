@@ -6,6 +6,7 @@
 config MCP_APPS_MCP_DAEMON
         tristate "MCP Daemon App"
         default n
+        depends on SIGNAL_FD && NET_LOCAL
         ---help---
                 Enable the MCP Daemon App
 
