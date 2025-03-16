@@ -5,6 +5,10 @@
 #include <stdint.h>
 #include <sys/uio.h>
 #include <assert.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <errno.h>
+#include <fcntl.h>
 
 #include "mcp_daemon_private.h"
 
@@ -12,6 +16,14 @@ int mcp_daemon_connect(mcp_daemon_con_t * con_dst, int peer_id)
 {
     int res;
     ssize_t rwres;
+
+    /* opening this fifo will block until the daemon has opened it for reading */
+    res = mkfifo(SOC_WAITER_FIFO, 0666);
+    assert(res >= 0 || errno == EEXIST);
+    int srv_fifo = open(SOC_WAITER_FIFO, O_WRONLY | O_CLOEXEC);
+    assert(srv_fifo >= 0);
+    res = close(srv_fifo);
+    assert(res == 0);
 
     int con = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     assert(con >= 0);

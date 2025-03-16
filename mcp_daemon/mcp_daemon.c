@@ -25,8 +25,6 @@
 
 #define POLLFDS_PEER_START 2
 
-// #define SRV_FIFO "/tmp/mcpd_"
-
 #define IS_READING 1
 #define IS_WRITING 2
 
@@ -536,6 +534,8 @@ int mcp_daemon_main(int argc, char *argv[])
     ssize_t rwres;
     sigset_t set;
 
+    usleep(100 * 1000); /* wait for backplane to start up */
+
     socket_sms_t s;
 
     pin_socket_ctx_init(&s.s0.pin_soc, "/dev/mcp0_clk", "/dev/mcp0_dat", "/dev/timer0", SIGUSR1, master_sm_next_byte_cb);
@@ -577,10 +577,11 @@ int mcp_daemon_main(int argc, char *argv[])
     res = listen(srv, 255);
     assert(res == 0);
 
-    // res = mkfifo(SRV_FIFO, 0666);
-    // assert(res >= 0 || errno == EEXIST);
-    // int srv_fifo = open(SRV_FIFO, O_RDONLY | O_CLOEXEC);
-    // assert(srv_fifo >= 0);
+    /* opening this fifo will unblock anyone blocked on opening it for writing */
+    res = mkfifo(SOC_WAITER_FIFO, 0666);
+    assert(res >= 0 || errno == EEXIST);
+    int srv_fifo = open(SOC_WAITER_FIFO, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+    assert(srv_fifo >= 0);
 
     nfds_t n_pollfds = POLLFDS_PEER_START;
     struct pollfd * pollfds = malloc(POLLFDS_PEER_START * sizeof(struct pollfd));
