@@ -209,24 +209,33 @@ static ssize_t op_read(FAR void *volinfo, FAR void *openinfo,
     if(!peer->is_reading) return -EBADF;
 
     uint8_t buf[5];
-    uint32_t lenu32;
-
     buf[0] = FS_OPEN_FILE_ACTION_CONTINUE;
-    lenu32 = buflen;
-    memcpy(buf + 1, &lenu32, 4);
+    uint32_t buflen_u32 = buflen;
+    memcpy(buf + 1, &buflen_u32, 4);
     mcp_daemon_write(peer->con, buf, 5);
-    mcp_daemon_read(peer->con, buffer, lenu32);
-    mcp_daemon_read(peer->con, buf, 5);
 
-    switch(buf[0]) {
+    uint32_t read_amount = 0;
+    uint32_t chunk;
+
+    while(buflen_u32) {
+        mcp_daemon_read(peer->con, &chunk, 4);
+        if(!chunk) break;
+        assert(chunk <= buflen_u32);
+        mcp_daemon_read(peer->con, buffer, chunk);
+        buffer += chunk;
+        buflen_u32 -= chunk;
+        read_amount += chunk;
+    }
+
+    uint8_t result;
+    mcp_daemon_read(peer->con, &result, 1);
+    switch(result) {
         case 0: break;
         case 1: return -EIO;
         default: assert(0);
     }
 
-    memcpy(&lenu32, buf + 1, 4);
-
-    return lenu32;
+    return read_amount;
 }
 
 static ssize_t op_write(FAR void *volinfo, FAR void *openinfo,
