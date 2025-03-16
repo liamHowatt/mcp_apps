@@ -1,0 +1,30 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config MCP_APPS_MCP_FS
+        tristate "MCP FS App"
+        default n
+        depends on NET_LOCAL && MCP_APPS_MCP_DAEMON && FS_USERFS && NET_LOOPBACK_PKTSIZE >= 16384 && SCHED_LPWORK
+        ---help---
+                Enable the MCP FS App
+
+if MCP_APPS_MCP_FS
+
+config MCP_APPS_MCP_FS_PROGNAME
+        string "Program name"
+        default "mcp_fs"
+        ---help---
+                This is the name of the program that will be used when the NSH ELF
+                program is installed.
+
+config MCP_APPS_MCP_FS_PRIORITY
+        int "MCP FS task priority"
+        default 100
+
+config MCP_APPS_MCP_FS_STACKSIZE
+        int "MCP FS stack size"
+        default DEFAULT_TASK_STACKSIZE
+
+endif

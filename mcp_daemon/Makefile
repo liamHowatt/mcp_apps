@@ -10,6 +10,7 @@ MODULE = $(CONFIG_MCP_APPS_MCP_DAEMON)
 # MCP Daemon
 
 MAINSRC = mcp_daemon.c
+CSRCS += mcp_daemon_lib.c
 CSRCS += mcp_board/mcp_bitbang/mcp_bitbang_client.c
 
 include $(APPDIR)/Application.mk

@@ -1,0 +1,14 @@
+include $(APPDIR)/Make.defs
+
+# MCP FS built-in application info
+
+PROGNAME = $(CONFIG_MCP_APPS_MCP_FS_PROGNAME)
+PRIORITY = $(CONFIG_MCP_APPS_MCP_FS_PRIORITY)
+STACKSIZE = $(CONFIG_MCP_APPS_MCP_FS_STACKSIZE)
+MODULE = $(CONFIG_MCP_APPS_MCP_FS)
+
+# MCP FS
+
+MAINSRC = mcp_fs.c
+
+include $(APPDIR)/Application.mk

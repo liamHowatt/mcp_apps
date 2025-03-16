@@ -20,19 +20,11 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <string.h>
-#include <stdint.h>
 
-#define MCP_DAEMON_RESULT_OK                 0
-#define MCP_DAEMON_RESULT_TOKEN_DOESNT_EXIST 1
-#define MCP_DAEMON_RESULT_MODULE_BUSY        2
-
-#define MCP_DAEMON_OPERATION_QUIT            0
-#define MCP_DAEMON_OPERATION_READ            1
-#define MCP_DAEMON_OPERATION_WRITE           2
+#include "mcp_daemon_private.h"
 
 #define POLLFDS_PEER_START 2
 
-#define SRV_SOC  "mcpd"
 // #define SRV_FIFO "/tmp/mcpd_"
 
 #define IS_READING 1
@@ -250,12 +242,12 @@ static void pin_socket_ctx_init(pin_socket_ctx_t * ctx,
     timer_sleep(ctx);
 }
 
-static void pin_socket_ctx_deinit(pin_socket_ctx_t * ctx)
-{
-    close(ctx->clk_fd);
-    close(ctx->dat_fd);
-    close(ctx->tim_fd);
-}
+// static void pin_socket_ctx_deinit(pin_socket_ctx_t * ctx)
+// {
+//     close(ctx->clk_fd);
+//     close(ctx->dat_fd);
+//     close(ctx->tim_fd);
+// }
 
 static void run_socket(pin_socket_ctx_t * ctx, uint8_t token)
 {
@@ -526,7 +518,7 @@ static void continue_transfer(socket_sms_t * s, peer_data_t * pd, struct pollfd 
             rwres = write(fd, buf, actually_move);
             assert(rwres == actually_move);
         } else {
-            rwres = read(fd, buf, actually_move);
+            rwres = mcp_daemon_util_full_read(fd, buf, actually_move);
             assert(rwres == actually_move);
             multitasking_write(s, buf, actually_move);
         }
@@ -578,8 +570,8 @@ int mcp_daemon_main(int argc, char *argv[])
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    assert(sizeof(SRV_SOC) <= sizeof(addr.sun_path));
-    memcpy(addr.sun_path, SRV_SOC, sizeof(SRV_SOC));
+    assert(sizeof(SOC_PATH) <= sizeof(addr.sun_path));
+    memcpy(addr.sun_path, SOC_PATH, sizeof(SOC_PATH));
     res = bind(srv, (struct sockaddr *)&addr, sizeof(addr));
     assert(res == 0);
     res = listen(srv, 255);
@@ -681,14 +673,14 @@ int mcp_daemon_main(int argc, char *argv[])
             rwres = read(new_soc, &for_token, 1);
             assert(rwres > 0);
 
-            uint8_t response = MCP_DAEMON_RESULT_OK;
+            uint8_t response = RESULT_OK;
 
             uint8_t i;
             struct pollfd * pfd;
             for(i = 0; i < s.s1.peer_count; i++)
                 if(s.s1.peer_datas[i].token == for_token) break;
             if(i == s.s1.peer_count) {
-                response = MCP_DAEMON_RESULT_TOKEN_DOESNT_EXIST;
+                response = RESULT_TOKEN_DOESNT_EXIST;
             } else {
                 pfd = &pollfds[POLLFDS_PEER_START + i];
             }
@@ -698,14 +690,14 @@ int mcp_daemon_main(int argc, char *argv[])
              * negative which means it's just disabled, not closed.
              * The only sentinel value meaning "vacant" here is -1.
              */
-            if(response == MCP_DAEMON_RESULT_OK && pfd->fd != -1) {
-                response = MCP_DAEMON_RESULT_MODULE_BUSY;
+            if(response == RESULT_OK && pfd->fd != -1) {
+                response = RESULT_MODULE_BUSY;
             }
 
             rwres = write(new_soc, &response, 1);
             assert(rwres > 0);
 
-            if(response == MCP_DAEMON_RESULT_OK) {
+            if(response == RESULT_OK) {
                 pfd->fd = new_soc;
             } else {
                 res = close(new_soc);
@@ -727,8 +719,8 @@ int mcp_daemon_main(int argc, char *argv[])
             rwres = read(pfd->fd, &operation, 1);
             assert(rwres > 0);
 
-            if(operation == MCP_DAEMON_OPERATION_QUIT) {
-                uint8_t response = MCP_DAEMON_RESULT_OK;
+            if(operation == OPERATION_QUIT) {
+                uint8_t response = RESULT_OK;
                 rwres = write(pfd->fd, &response, 1);
                 assert(rwres > 0);
 
@@ -739,9 +731,9 @@ int mcp_daemon_main(int argc, char *argv[])
             }
             else {
 
-                pd->is_doing = operation == MCP_DAEMON_OPERATION_READ ? IS_READING : IS_WRITING;
+                pd->is_doing = operation;
 
-                rwres = read(pfd->fd, &pd->transaction_remaining_len, 4);
+                rwres = mcp_daemon_util_full_read(pfd->fd, &pd->transaction_remaining_len, 4);
                 assert(rwres == 4);
 
                 pfd->fd = -pfd->fd;
@@ -772,4 +764,18 @@ int mcp_daemon_main(int argc, char *argv[])
     // pin_socket_ctx_deinit(&s.s0.pin_soc);
 
     return 0;
+}
+
+ssize_t mcp_daemon_util_full_read(int fd, void * buf, size_t count)
+{
+    size_t remain = count;
+    uint8_t * buf_u8 = buf;
+    while(remain) {
+        ssize_t rwres = read(fd, buf_u8, remain);
+        if (rwres < 0) return rwres;
+        if (rwres == 0) break;
+        buf_u8 += rwres;
+        remain -= rwres;
+    }
+    return count - remain;
 }
