@@ -1,2 +1,6 @@
 /Kconfig
 /.kconfig
+.built
+.depend
+*.o
+Make.dep
