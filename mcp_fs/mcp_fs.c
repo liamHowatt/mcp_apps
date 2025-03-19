@@ -349,7 +349,7 @@ static int op_opendir(FAR void *volinfo, FAR const char *relpath,
                 }
             }
         }
-        do {
+        while(1) {
             if(check_peer_is_present(vinfo->peer_count)) {
                 peer_t * peer = volinfo_ensure_peer(vinfo, vinfo->peer_count);
                 peer->has_been_connected_to = true;
@@ -358,7 +358,8 @@ static int op_opendir(FAR void *volinfo, FAR const char *relpath,
                 vinfo->self_index = vinfo->peer_count;
                 volinfo_ensure_peer(vinfo, vinfo->peer_count);
             }
-        } while(vinfo->self_index < 0);
+            else break;
+        };
 
         dir_t * dir = malloc(sizeof(dir_t));
         assert(dir);
