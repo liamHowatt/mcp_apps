@@ -247,18 +247,28 @@ static void pin_socket_ctx_init(pin_socket_ctx_t * ctx,
 //     close(ctx->tim_fd);
 // }
 
+static void run_socket_assert(bool condition)
+{
+    if(condition) return;
+
+    while(1) {
+        puts("mcp_daemon: pin connection issue");
+        sleep(1);
+    }
+}
+
 static void run_socket(pin_socket_ctx_t * ctx, uint8_t token)
 {
-    do_write(ctx, MMN_SRV_OPCODE_WHEREAMI);
-    uint8_t where = do_read(ctx);
-    printf("where: %d\n", (int) where);
+    // do_write(ctx, MMN_SRV_OPCODE_WHEREAMI);
+    // uint8_t where = do_read(ctx);
+    // printf("where: %d\n", (int) where);
 
     do_write(ctx, MMN_SRV_OPCODE_WRITE);
     do_write(ctx, 4); // "cpu4" is 4 bytes
     do_write(ctx, token); // send to self
     uint8_t free_space = do_read(ctx);
-    printf("free space: %d\n", (int) free_space);
-    assert(free_space >= 4);
+    // printf("free space: %d\n", (int) free_space);
+    run_socket_assert(free_space >= 4);
     do_write(ctx, 'c');
     do_write(ctx, 'p');
     do_write(ctx, 'u');
@@ -268,13 +278,13 @@ static void run_socket(pin_socket_ctx_t * ctx, uint8_t token)
     do_write(ctx, 4); // "cpu4" is 4 bytes
     do_write(ctx, token); // recv from self
     uint8_t readable = do_read(ctx);
-    printf("amount readable: %d\n", (int) readable);
-    assert(readable == 4);
-    assert(do_read(ctx) == 'c');
-    assert(do_read(ctx) == 'p');
-    assert(do_read(ctx) == 'u');
-    assert(do_read(ctx) == '4');
-    printf("'cpu4' received\n");
+    // printf("amount readable: %d\n", (int) readable);
+    run_socket_assert(readable == 4);
+    run_socket_assert(do_read(ctx) == 'c');
+    run_socket_assert(do_read(ctx) == 'p');
+    run_socket_assert(do_read(ctx) == 'u');
+    run_socket_assert(do_read(ctx) == '4');
+    // printf("'cpu4' received\n");
 }
 
 static void poller_sm_start_over(poller_socket_sm_t * sm)
