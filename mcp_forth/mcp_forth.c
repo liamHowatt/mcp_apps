@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include "mcp_forth/mcp_forth.h"
+#include "bindings/bindings.h"
 
 int mcp_forth_main(int argc, char *argv[])
 {
@@ -57,6 +58,9 @@ int mcp_forth_main(int argc, char *argv[])
 
     static const m4_runtime_cb_array_t * cbs[] = {
         m4_runtime_lib_io,
+        m4_runtime_lib_string,
+        m4_runtime_lib_time,
+        M4_RUNTIME_LIB_ENTRY_MCP_DAEMON
         NULL
     };
 

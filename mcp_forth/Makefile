@@ -15,5 +15,8 @@ CSRCS += mcp_forth/compile.c
 CSRCS += mcp_forth/vm_backend.c
 CSRCS += mcp_forth/vm_engine.c
 CSRCS += mcp_forth/runtime_io.c
+CSRCS += mcp_forth/runtime_string.c
+CSRCS += mcp_forth/runtime_time.c
+CSRCS += bindings/runtime_mcp_daemon.c
 
 include $(APPDIR)/Application.mk
