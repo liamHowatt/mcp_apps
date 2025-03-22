@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <fcntl.h>
+#include <unistd.h>
 
 #include "mcp_forth/mcp_forth.h"
 
