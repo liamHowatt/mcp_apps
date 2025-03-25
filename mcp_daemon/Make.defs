@@ -1,5 +1,0 @@
-ifneq ($(CONFIG_MCP_APPS_MCP_DAEMON),)
-CONFIGURED_APPS += $(APPDIR)/mcp_apps/mcp_daemon
-CFLAGS += ${INCDIR_PREFIX}${APPDIR}/mcp_apps/mcp_daemon/include
-CXXFLAGS += ${INCDIR_PREFIX}${APPDIR}/mcp_apps/mcp_daemon/include
-endif

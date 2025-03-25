@@ -1,0 +1,5 @@
+ifneq ($(CONFIG_MCP_APPS_MCPD),)
+CONFIGURED_APPS += $(APPDIR)/mcp_apps/mcpd
+CFLAGS += ${INCDIR_PREFIX}${APPDIR}/mcp_apps/mcpd/include
+CXXFLAGS += ${INCDIR_PREFIX}${APPDIR}/mcp_apps/mcpd/include
+endif

@@ -3,27 +3,27 @@
 # see the file kconfig-language.txt in the NuttX tools repository.
 #
 
-config MCP_APPS_MCP_DAEMON
+config MCP_APPS_MCPD
         tristate "MCP Daemon App"
         default n
         depends on SIGNAL_FD && NET_LOCAL
         ---help---
                 Enable the MCP Daemon App
 
-if MCP_APPS_MCP_DAEMON
+if MCP_APPS_MCPD
 
-config MCP_APPS_MCP_DAEMON_PROGNAME
+config MCP_APPS_MCPD_PROGNAME
         string "Program name"
-        default "mcp_daemon"
+        default "mcpd"
         ---help---
                 This is the name of the program that will be used when the NSH ELF
                 program is installed.
 
-config MCP_APPS_MCP_DAEMON_PRIORITY
+config MCP_APPS_MCPD_PRIORITY
         int "MCP Daemon task priority"
         default 100
 
-config MCP_APPS_MCP_DAEMON_STACKSIZE
+config MCP_APPS_MCPD_STACKSIZE
         int "MCP Daemon stack size"
         default DEFAULT_TASK_STACKSIZE
 

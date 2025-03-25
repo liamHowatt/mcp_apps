@@ -60,7 +60,7 @@ int mcp_forth_main(int argc, char *argv[])
         m4_runtime_lib_io,
         m4_runtime_lib_string,
         m4_runtime_lib_time,
-        M4_RUNTIME_LIB_ENTRY_MCP_DAEMON
+        M4_RUNTIME_LIB_ENTRY_MCPD
         NULL
     };
 

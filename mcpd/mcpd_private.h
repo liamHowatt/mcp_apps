@@ -1,6 +1,6 @@
 #pragma once
 
-#include <mcp/mcp_daemon.h>
+#include <mcp/mcpd.h>
 
 #include <stddef.h>
 
@@ -9,10 +9,17 @@
 #define RESULT_MODULE_BUSY        2
 
 #define OPERATION_QUIT            0
+
 #define OPERATION_READ            1
 #define OPERATION_WRITE           2
+
+#define OPERATION_GPIO_ACQUIRE     3
+#define OPERATION_GPIO_SET         4
+
+#define OPERATION_RESOURCE_ACQUIRE 5
+#define OPERATION_RESOURCE_ROUTE   6
 
 #define SOC_PATH "mcpd"
 #define SOC_WAITER_FIFO "mcpd_"
 
-ssize_t mcp_daemon_util_full_read(int fd, void * buf, size_t count);
+ssize_t mcpd_util_full_read(int fd, void * buf, size_t count);

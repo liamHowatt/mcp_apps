@@ -1,4 +1,4 @@
-#include <mcp/mcp_daemon.h>
+#include <mcp/mcpd.h>
 #include <nuttx/fs/userfs.h>
 #include <string.h>
 #include <stdio.h>
@@ -18,7 +18,7 @@
 #define FS_OPEN_FILE_ACTION_STAT       2
 
 typedef struct {
-    mcp_daemon_con_t con;
+    mcpd_con_t con;
     int refcount;
     bool has_been_connected_to;
     bool is_reading;
@@ -46,7 +46,7 @@ static peer_t * volinfo_ensure_peer(volinfo_t * vinfo, int peer_id)
     vinfo->peers = realloc(vinfo->peers, new_peer_count * sizeof(peer_t));
     assert(vinfo->peers);
     for(int i = vinfo->peer_count; i < new_peer_count; i++) {
-        vinfo->peers[i].con = MCP_DAEMON_CON_NULL;
+        vinfo->peers[i].con = MCPD_CON_NULL;
         vinfo->peers[i].has_been_connected_to = false;
     }
     vinfo->peer_count = new_peer_count;
@@ -82,17 +82,17 @@ static bool check_peer_is_present(int peer_id)
 {
     int res;
 
-    mcp_daemon_con_t con;
-    res = mcp_daemon_connect(&con, peer_id);
+    mcpd_con_t con;
+    res = mcpd_connect(&con, peer_id);
 
-    if(res == MCP_DAEMON_DOESNT_EXIST) {
+    if(res == MCPD_DOESNT_EXIST) {
         return false;
     }
 
-    if(res == MCP_DAEMON_OK) {
-        mcp_daemon_disconnect(con);
+    if(res == MCPD_OK) {
+        mcpd_disconnect(con);
     } else {
-        assert(res == MCP_DAEMON_BUSY);
+        assert(res == MCPD_BUSY);
     }
 
     return true;
@@ -128,38 +128,38 @@ static int op_open(FAR void *volinfo, FAR const char *relpath,
 
     peer_t * peer = peer_id < vinfo->peer_count ? &vinfo->peers[peer_id] : NULL;
 
-    if(peer && peer->con != MCP_DAEMON_CON_NULL) return -EBUSY;
+    if(peer && peer->con != MCPD_CON_NULL) return -EBUSY;
 
     size_t filename_len = strlen(p);
     if(filename_len > 255) return -ENAMETOOLONG;
 
-    mcp_daemon_con_t con;
-    res = mcp_daemon_connect(&con, peer_id);
-    if(res == MCP_DAEMON_DOESNT_EXIST) return -ENOENT;
+    mcpd_con_t con;
+    res = mcpd_connect(&con, peer_id);
+    if(res == MCPD_DOESNT_EXIST) return -ENOENT;
 
     peer = volinfo_ensure_peer(vinfo, peer_id);
     peer->has_been_connected_to = true;
 
-    if(res == MCP_DAEMON_BUSY) return -EBUSY;
-    assert(res == MCP_DAEMON_OK);
+    if(res == MCPD_BUSY) return -EBUSY;
+    assert(res == MCPD_OK);
 
     uint8_t buf[2];
 
     buf[0] = 0; // protocol
-    mcp_daemon_write(con, buf, 1);
-    mcp_daemon_read(con, buf, 1);
+    mcpd_write(con, buf, 1);
+    mcpd_read(con, buf, 1);
     if(buf[0] != 0) { // protocol not supported
-        mcp_daemon_disconnect(con);
+        mcpd_disconnect(con);
         return accmode == O_RDONLY ? -ENOENT : -EROFS;
     }
 
     buf[0] = accmode == O_RDONLY;
     buf[1] = filename_len;
-    mcp_daemon_write(con, buf, 2);
-    mcp_daemon_write(con, p, filename_len);
-    mcp_daemon_read(con, buf, 1);
+    mcpd_write(con, buf, 2);
+    mcpd_write(con, p, filename_len);
+    mcpd_read(con, buf, 1);
     if(buf[0]) {
-        mcp_daemon_disconnect(con);
+        mcpd_disconnect(con);
         switch(buf[0]) {
             case 1: return -EIO;
             case 2: return -EACCES;
@@ -187,10 +187,10 @@ static int op_close(FAR void *volinfo, FAR void *openinfo)
     uint8_t buf[1];
 
     buf[0] = FS_OPEN_FILE_ACTION_CLOSE;
-    mcp_daemon_write(peer->con, buf, 1);
-    mcp_daemon_read(peer->con, buf, 1);
-    mcp_daemon_disconnect(peer->con);
-    peer->con = MCP_DAEMON_CON_NULL;
+    mcpd_write(peer->con, buf, 1);
+    mcpd_read(peer->con, buf, 1);
+    mcpd_disconnect(peer->con);
+    peer->con = MCPD_CON_NULL;
 
     switch(buf[0]) {
         case 0: break;
@@ -212,23 +212,23 @@ static ssize_t op_read(FAR void *volinfo, FAR void *openinfo,
     buf[0] = FS_OPEN_FILE_ACTION_CONTINUE;
     uint32_t buflen_u32 = buflen;
     memcpy(buf + 1, &buflen_u32, 4);
-    mcp_daemon_write(peer->con, buf, 5);
+    mcpd_write(peer->con, buf, 5);
 
     uint32_t read_amount = 0;
     uint32_t chunk;
 
     while(buflen_u32) {
-        mcp_daemon_read(peer->con, &chunk, 4);
+        mcpd_read(peer->con, &chunk, 4);
         if(!chunk) break;
         assert(chunk <= buflen_u32);
-        mcp_daemon_read(peer->con, buffer, chunk);
+        mcpd_read(peer->con, buffer, chunk);
         buffer += chunk;
         buflen_u32 -= chunk;
         read_amount += chunk;
     }
 
     uint8_t result;
-    mcp_daemon_read(peer->con, &result, 1);
+    mcpd_read(peer->con, &result, 1);
     switch(result) {
         case 0: break;
         case 1: return -EIO;
@@ -250,9 +250,9 @@ static ssize_t op_write(FAR void *volinfo, FAR void *openinfo,
     buf[0] = FS_OPEN_FILE_ACTION_CONTINUE;
     uint32_t lenu32 = buflen;
     memcpy(buf + 1, &lenu32, 4);
-    mcp_daemon_write(peer->con, buf, 5);
-    mcp_daemon_write(peer->con, buffer, lenu32);
-    mcp_daemon_read(peer->con, buf, 1);
+    mcpd_write(peer->con, buf, 5);
+    mcpd_write(peer->con, buffer, lenu32);
+    mcpd_read(peer->con, buf, 1);
 
     switch(buf[0]) {
         case 0: break;
@@ -301,8 +301,8 @@ static int op_fstat(FAR void *volinfo, FAR void *openinfo,
 
     uint8_t buf[1 + 2 + 4 + 2];
     buf[0] = FS_OPEN_FILE_ACTION_STAT;
-    mcp_daemon_write(peer->con, buf, 1);
-    mcp_daemon_read(peer->con, buf, sizeof(buf));
+    mcpd_write(peer->con, buf, 1);
+    mcpd_read(peer->con, buf, sizeof(buf));
 
     if(buf[0] == 1) return -EIO;
     assert(buf[0] == 0);
@@ -338,7 +338,7 @@ static int op_opendir(FAR void *volinfo, FAR const char *relpath,
     if(*relpath == '\0') {
         for(int i = 0; i < vinfo->peer_count; i++) {
             peer_t * peer = &vinfo->peers[i];
-            if(peer->con == MCP_DAEMON_CON_NULL
+            if(peer->con == MCPD_CON_NULL
                && !peer->has_been_connected_to
                && i != vinfo->self_index) {
                 if(check_peer_is_present(i)) {
@@ -379,31 +379,31 @@ static int op_opendir(FAR void *volinfo, FAR const char *relpath,
     if(*p != '\0') return -ENOTDIR;
 
     peer_t * peer = peer_id < vinfo->peer_count ? &vinfo->peers[peer_id] : NULL;
-    if(peer && peer->con != MCP_DAEMON_CON_NULL) return -EBUSY;
+    if(peer && peer->con != MCPD_CON_NULL) return -EBUSY;
 
-    mcp_daemon_con_t con;
-    res = mcp_daemon_connect(&con, peer_id);
-    if(res == MCP_DAEMON_DOESNT_EXIST) return -ENOENT;
+    mcpd_con_t con;
+    res = mcpd_connect(&con, peer_id);
+    if(res == MCPD_DOESNT_EXIST) return -ENOENT;
 
     peer = volinfo_ensure_peer(vinfo, peer_id);
     peer->has_been_connected_to = true;
 
-    if(res == MCP_DAEMON_BUSY) return -EBUSY;
-    assert(res == MCP_DAEMON_OK);
+    if(res == MCPD_BUSY) return -EBUSY;
+    assert(res == MCPD_OK);
 
     uint8_t buf[1];
 
     buf[0] = 0; // protocol
-    mcp_daemon_write(con, buf, 1);
-    mcp_daemon_read(con, buf, 1);
+    mcpd_write(con, buf, 1);
+    mcpd_read(con, buf, 1);
 
     uint32_t byte_count;
     if(buf[0] != 0) { // protocol not supported
         byte_count = 0;
     } else {
         buf[0] = FS_BASE_ACTION_LS;
-        mcp_daemon_write(con, buf, 1);
-        mcp_daemon_read(con, &byte_count, sizeof(byte_count));
+        mcpd_write(con, buf, 1);
+        mcpd_read(con, &byte_count, sizeof(byte_count));
     }
 
     dir_t * dir = malloc(sizeof(dir_t) + byte_count);
@@ -412,9 +412,9 @@ static int op_opendir(FAR void *volinfo, FAR const char *relpath,
     dir->count = byte_count;
     dir->cursor = 0;
 
-    mcp_daemon_read(con, dir->fnames, byte_count);
+    mcpd_read(con, dir->fnames, byte_count);
 
-    mcp_daemon_disconnect(con);
+    mcpd_disconnect(con);
 
     vinfo->open_dir_count++;
     *dir_dst = dir;
@@ -492,36 +492,36 @@ static int op_unlink(FAR void *volinfo, FAR const char *relpath)
     if(*p == '\0') return -EPERM;
 
     peer_t * peer = peer_id < vinfo->peer_count ? &vinfo->peers[peer_id] : NULL;
-    if(peer && peer->con != MCP_DAEMON_CON_NULL) return -EBUSY;
+    if(peer && peer->con != MCPD_CON_NULL) return -EBUSY;
 
     size_t filename_len = strlen(p);
     if(filename_len > 255) return -ENAMETOOLONG;
 
-    mcp_daemon_con_t con;
-    res = mcp_daemon_connect(&con, peer_id);
-    if(res == MCP_DAEMON_DOESNT_EXIST) return -ENOENT;
+    mcpd_con_t con;
+    res = mcpd_connect(&con, peer_id);
+    if(res == MCPD_DOESNT_EXIST) return -ENOENT;
 
     peer = volinfo_ensure_peer(vinfo, peer_id);
     peer->has_been_connected_to = true;
 
-    if(res == MCP_DAEMON_BUSY) return -EBUSY;
-    assert(res == MCP_DAEMON_OK);
+    if(res == MCPD_BUSY) return -EBUSY;
+    assert(res == MCPD_OK);
 
     uint8_t buf[2];
 
     buf[0] = 0; // protocol
-    mcp_daemon_write(con, buf, 1);
-    mcp_daemon_read(con, buf, 1);
+    mcpd_write(con, buf, 1);
+    mcpd_read(con, buf, 1);
     if(buf[0] != 0) { // protocol not supported
-        mcp_daemon_disconnect(con);
+        mcpd_disconnect(con);
         return -ENOENT;
     }
 
     buf[0] = FS_BASE_ACTION_DELETE;
     buf[1] = filename_len;
-    mcp_daemon_write(con, buf, 2);
-    mcp_daemon_write(con, p, filename_len);
-    mcp_daemon_read(con, buf, 1);
+    mcpd_write(con, buf, 2);
+    mcpd_write(con, p, filename_len);
+    mcpd_read(con, buf, 1);
     switch(buf[0]) {
         case 0: break;
         case 1: return -EIO;
@@ -531,7 +531,7 @@ static int op_unlink(FAR void *volinfo, FAR const char *relpath)
         default: assert(0);
     }
 
-    mcp_daemon_disconnect(con);
+    mcpd_disconnect(con);
 
     return 0;
 }
@@ -609,7 +609,7 @@ static int op_destroy(FAR void *volinfo)
     volinfo_t * vinfo = volinfo;
 
     assert(vinfo->open_dir_count == 0);
-    for(int i = 0; i < vinfo->peer_count; i++) assert(vinfo->peers[i].con == MCP_DAEMON_CON_NULL);
+    for(int i = 0; i < vinfo->peer_count; i++) assert(vinfo->peers[i].con == MCPD_CON_NULL);
     free(vinfo->peers);
 
     vinfo->was_destroyed = true;

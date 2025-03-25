@@ -1,6 +1,6 @@
 [submodule "mcp_forth/mcp_forth"]
 	path = mcp_forth/mcp_forth
 	url = https://github.com/liamHowatt/mcp_forth.git
-[submodule "mcp_daemon/mcp_board"]
-	path = mcp_daemon/mcp_board
+[submodule "mcpd/mcp_board"]
+	path = mcpd/mcp_board
 	url = https://github.com/liamHowatt/mcp_board.git

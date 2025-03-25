@@ -21,7 +21,8 @@
 #include <sys/un.h>
 #include <string.h>
 
-#include "mcp_daemon_private.h"
+#include "mcpd_private.h"
+#include <arch/board/mcp/mcp_pins_array.h>
 
 #define POLLFDS_PEER_START 2
 
@@ -33,11 +34,19 @@
 #define ABS(x) ((x) < 0 ? -(x) : (x))
 
 typedef struct {
+    int16_t from;
+    int16_t to;
+} resource_t;
+
+typedef struct {
     uint8_t token;
 
     uint8_t is_doing;
     bool was_unblocked;
     uint32_t transaction_remaining_len;
+
+    uint32_t resource_count;
+    resource_t * resources;
 } peer_data_t;
 
 typedef struct pin_socket_ctx_t pin_socket_ctx_t;
@@ -80,6 +89,7 @@ typedef struct {
     master_socket_sm_t s0;
     poller_socket_sm_t s1;
     int sfd;
+    uint8_t pin_owners[MCP_PINS_COUNT];
 } socket_sms_t;
 
 static void pin_set(pin_socket_ctx_t * ctx, mbb_cli_pin_t pinno, bool val) {
@@ -252,7 +262,7 @@ static void run_socket_assert(bool condition)
     if(condition) return;
 
     while(1) {
-        puts("mcp_daemon: pin connection issue");
+        puts("mcpd: pin connection issue");
         sleep(1);
     }
 }
@@ -526,7 +536,7 @@ static void continue_transfer(socket_sms_t * s, peer_data_t * pd, struct pollfd 
             rwres = write(fd, buf, actually_move);
             assert(rwres == actually_move);
         } else {
-            rwres = mcp_daemon_util_full_read(fd, buf, actually_move);
+            rwres = mcpd_util_full_read(fd, buf, actually_move);
             assert(rwres == actually_move);
             multitasking_write(s, buf, actually_move);
         }
@@ -538,7 +548,7 @@ static void continue_transfer(socket_sms_t * s, peer_data_t * pd, struct pollfd 
     }
 }
 
-int mcp_daemon_main(int argc, char *argv[])
+int mcpd_main(int argc, char *argv[])
 {
     int res;
     ssize_t rwres;
@@ -558,6 +568,12 @@ int mcp_daemon_main(int argc, char *argv[])
     run_socket(&s.s0.pin_soc, my_token);
     run_socket(&s.s1.pin_soc, my_token);
 
+    uint8_t s_wheres[2];
+    do_write(&s.s0.pin_soc, MMN_SRV_OPCODE_WHEREAMI);
+    s_wheres[0] = do_read(&s.s0.pin_soc);
+    do_write(&s.s1.pin_soc, MMN_SRV_OPCODE_WHEREAMI);
+    s_wheres[1] = do_read(&s.s1.pin_soc);
+
     s.s1.something_happened = false;
     s.s1.new_global_token_count = 0;
     s.s1.peer_datas = NULL;
@@ -573,6 +589,8 @@ int mcp_daemon_main(int argc, char *argv[])
     assert(res == 0);
     s.sfd = signalfd(-1, &set, SFD_CLOEXEC);
     assert(s.sfd >= 0);
+
+    memset(s.pin_owners, 255, sizeof(s.pin_owners));
 
     // nonblock is so `accept` doesn't block
     int srv = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
@@ -632,6 +650,9 @@ int mcp_daemon_main(int argc, char *argv[])
                     peer_data_t * pd = &s.s1.peer_datas[i];
                     pd->token = new_token;
                     pd->is_doing = 0;
+
+                    pd->resource_count = 0;
+                    pd->resources = NULL;
 
                     struct pollfd * pfd = &pollfds[POLLFDS_PEER_START + i];
                     pfd->fd = -1;
@@ -718,12 +739,12 @@ int mcp_daemon_main(int argc, char *argv[])
             if(--remaining_ready_fds == 0) continue;
         }
 
-        for(uint8_t i = 0; i < s.s1.peer_count; i++) {
-            struct pollfd * pfd = &pollfds[POLLFDS_PEER_START + i];
+        for(uint8_t peer_i = 0; peer_i < s.s1.peer_count; peer_i++) {
+            struct pollfd * pfd = &pollfds[POLLFDS_PEER_START + peer_i];
             if(!pfd->revents) continue;
             assert(!(pfd->revents & (POLLERR | POLLNVAL)));
 
-            peer_data_t * pd = &s.s1.peer_datas[i];
+            peer_data_t * pd = &s.s1.peer_datas[peer_i];
 
             uint8_t operation;
 
@@ -739,12 +760,173 @@ int mcp_daemon_main(int argc, char *argv[])
                 assert(res == 0);
 
                 pfd->fd = -1;
+
+                for(uint32_t i = 0; i < MCP_PINS_COUNT; i++) {
+                    if(s.pin_owners[i] == pd->token) s.pin_owners[i] = 255;
+                }
+
+                for(uint32_t i = 0; i < pd->resource_count; i++) {
+                    resource_t * resource = &pd->resources[i];
+                    if(resource->from == -1) continue;
+
+                    uint8_t from_socketno = resource->from >> 2;
+                    uint8_t from_pinno = resource->from & 3;
+                    uint8_t to_socketno = resource->to >> 2;
+                    uint8_t to_pinno = resource->to & 3;
+
+                    uint8_t info_byte = (from_pinno << 3) | (to_pinno << 1);
+                    uint8_t buf[] = {MMN_SRV_OPCODE_CROSSPOINT, from_socketno, to_socketno, info_byte};
+                    multitasking_write(&s, buf, sizeof(buf));
+                }
+
+                free(pd->resources);
+                pd->resource_count = 0;
+                pd->resources = NULL;
+            }
+            else if(operation == OPERATION_GPIO_ACQUIRE) {
+                struct {uint8_t socketno; uint8_t pinno;} req;
+                rwres = mcpd_util_full_read(pfd->fd, &req, sizeof(req));
+                assert(rwres == sizeof(req));
+                uint8_t resp = 255;
+                do {
+                    if(req.pinno >= 4
+                       || req.socketno == s_wheres[0]
+                       || req.socketno == s_wheres[1]) break;
+                    int16_t to = (req.socketno << 2) | req.pinno;
+                    bool in_use = false;
+                    for(uint8_t i = 0; i < s.s1.peer_count; i++) {
+                        peer_data_t * pd2 = &s.s1.peer_datas[i];
+                        for(uint32_t j = 0; j < pd2->resource_count; j++) {
+                            if(pd2->resources[j].to == to) {
+                                in_use = true;
+                                break;
+                            }
+                        }
+                        if(in_use) break;
+                    }
+                    if(in_use) break;
+                    uint32_t new_resource_idx = pd->resource_count++;
+                    pd->resources = realloc(pd->resources, pd->resource_count * sizeof(*pd->resources));
+                    assert(pd->resources);
+                    pd->resources[new_resource_idx].from = -1;
+                    pd->resources[new_resource_idx].to = to;
+                    assert(new_resource_idx < 255);
+                    resp = new_resource_idx;
+                } while(0);
+                rwres = write(pfd->fd, &resp, 1);
+                assert(rwres > 0);
+            }
+            else if(operation == OPERATION_GPIO_SET) {
+                struct {uint8_t gpio_id; uint8_t en;} req;
+                rwres = mcpd_util_full_read(pfd->fd, &req, sizeof(req));
+                assert(rwres == sizeof(req));
+                req.en = req.en ? 1 : 0;
+                do {
+                    if(req.gpio_id >= pd->resource_count
+                       || pd->resources[req.gpio_id].from != -1) break;
+                    int16_t to = pd->resources[req.gpio_id].to;
+                    uint8_t socketno = to >> 2;
+                    uint8_t pinno = to & 3;
+                    // crosspoint, set direct, socketno, pinno with enable bit
+                    uint8_t buf[] = {MMN_SRV_OPCODE_CROSSPOINT, 255, socketno, (pinno << 1) | req.en};
+                    multitasking_write(&s, buf, sizeof(buf));
+                } while(0);
+            }
+            else if(operation == OPERATION_RESOURCE_ACQUIRE) {
+                uint8_t type;
+                rwres = read(pfd->fd, &type, 1);
+                assert(rwres > 0);
+                uint32_t i;
+                for(i = 0; i < MCP_PINS_COUNT; i++)
+                    if(mcp_pins[i].type == type && s.pin_owners[i] == 0xff) break;
+                uint8_t resp;
+                if(i == MCP_PINS_COUNT) {
+                    resp = 255;
+                } else {
+                    assert(i < 255);
+                    resp = i;
+                    s.pin_owners[i] = pd->token;
+                }
+                rwres = write(pfd->fd, &resp, 1);
+                assert(rwres > 0);
+            }
+            else if(operation == OPERATION_RESOURCE_ROUTE) {
+                struct {uint8_t resource_id; uint8_t io_type; uint8_t socketno; uint8_t pinno;} req;
+                rwres = mcpd_util_full_read(pfd->fd, &req, sizeof(req));
+                assert(rwres == sizeof(req));
+                uint8_t resp = 255;
+                do {
+                    if(req.pinno >= 4
+                       || req.resource_id >= MCP_PINS_COUNT || s.pin_owners[req.resource_id] != pd->token) {
+                        resp = -MCPD_BAD_REQUEST;
+                        break;
+                    }
+                    if(req.socketno == s_wheres[0] || req.socketno == s_wheres[1]) {
+                        resp = -MCPD_RESOURCE_UNAVAILABLE;
+                        break;
+                    }
+
+                    const mcp_pins_entry_t * entry = &mcp_pins[req.resource_id];
+
+                    resp = -MCPD_BAD_REQUEST;
+                    if(entry->type == MCP_PINS_TYPE_SPI) { if(req.io_type >= MCP_PINS_SPI_LAST_) break; }
+                    else assert(0);
+
+                    const mcp_pins_dsc_t * my_dsc = &entry->pins[req.io_type];
+                    uint8_t my_socketno = s_wheres[my_dsc->socket_id];
+                    uint8_t my_pinno = my_dsc->pinno;
+                    uint8_t from_socketno, from_pinno, to_socketno, to_pinno;
+                    if(my_dsc->is_input) {
+                        from_socketno = req.socketno;
+                        from_pinno = req.pinno;
+                        to_socketno = my_socketno;
+                        to_pinno = my_pinno;
+                    } else {
+                        from_socketno = my_socketno;
+                        from_pinno = my_pinno;
+                        to_socketno = req.socketno;
+                        to_pinno = req.pinno;
+                    }
+                    int16_t from = (from_socketno << 2) | from_pinno;
+                    int16_t to = (to_socketno << 2) | to_pinno;
+                    bool in_use = false;
+                    for(uint8_t i = 0; i < s.s1.peer_count; i++) {
+                        peer_data_t * pd2 = &s.s1.peer_datas[i];
+                        for(uint32_t j = 0; j < pd2->resource_count; j++) {
+                            in_use = true;
+                            if(my_dsc->is_input) { if(pd2->resources[j].from == from) break; }
+                            else { if(pd2->resources[j].to == to) break; }
+                            in_use = false;
+                        }
+                        if(in_use) break;
+                    }
+                    if(in_use) {
+                        resp = -MCPD_RESOURCE_UNAVAILABLE;
+                        break;
+                    }
+
+                    uint8_t info_byte_gpio_dis = (from_pinno << 3) | (to_pinno << 1);
+                    uint8_t info_byte_route = info_byte_gpio_dis | 1;
+                    uint8_t buf[] = {MMN_SRV_OPCODE_CROSSPOINT, 255,           to_socketno, info_byte_gpio_dis,
+                                     MMN_SRV_OPCODE_CROSSPOINT, from_socketno, to_socketno, info_byte_route    };
+                    multitasking_write(&s, buf, sizeof(buf));
+
+                    uint32_t new_resource_idx = pd->resource_count++;
+                    pd->resources = realloc(pd->resources, pd->resource_count * sizeof(*pd->resources));
+                    assert(pd->resources);
+                    pd->resources[new_resource_idx].from = from;
+                    pd->resources[new_resource_idx].to = to;
+
+                    resp = 0;
+                } while(0);
+                rwres = write(pfd->fd, &resp, 1);
+                assert(rwres > 0);
             }
             else {
 
                 pd->is_doing = operation;
 
-                rwres = mcp_daemon_util_full_read(pfd->fd, &pd->transaction_remaining_len, 4);
+                rwres = mcpd_util_full_read(pfd->fd, &pd->transaction_remaining_len, 4);
                 assert(rwres == 4);
 
                 pfd->fd = -pfd->fd;
@@ -766,6 +948,7 @@ int mcp_daemon_main(int argc, char *argv[])
     // }
 
     free(pollfds);
+    for(uint8_t i = 0; i < s.s1.peer_count; i++) free(s.s1.peer_datas[i].resources);
     free(s.s1.peer_datas);
 
     // // close(srv_fifo);
@@ -777,7 +960,7 @@ int mcp_daemon_main(int argc, char *argv[])
     return 0;
 }
 
-ssize_t mcp_daemon_util_full_read(int fd, void * buf, size_t count)
+ssize_t mcpd_util_full_read(int fd, void * buf, size_t count)
 {
     size_t remain = count;
     uint8_t * buf_u8 = buf;

@@ -10,9 +10,10 @@
 #include <errno.h>
 #include <fcntl.h>
 
-#include "mcp_daemon_private.h"
+#include "mcpd_private.h"
+#include <arch/board/mcp/mcp_pins_array.h>
 
-int mcp_daemon_connect(mcp_daemon_con_t * con_dst, int peer_id)
+int mcpd_connect(mcpd_con_t * con_dst, int peer_id)
 {
     int res;
     ssize_t rwres;
@@ -54,10 +55,10 @@ int mcp_daemon_connect(mcp_daemon_con_t * con_dst, int peer_id)
     }
 
     *con_dst = con;
-    return MCP_DAEMON_OK;
+    return MCPD_OK;
 }
 
-void mcp_daemon_disconnect(mcp_daemon_con_t con)
+void mcpd_disconnect(mcpd_con_t con)
 {
     int res;
     ssize_t rwres;
@@ -75,7 +76,7 @@ void mcp_daemon_disconnect(mcp_daemon_con_t con)
     assert(res == 0);
 }
 
-void mcp_daemon_write(mcp_daemon_con_t con, const void * data, uint32_t len)
+void mcpd_write(mcpd_con_t con, const void * data, uint32_t len)
 {
     ssize_t rwres;
 
@@ -93,7 +94,7 @@ void mcp_daemon_write(mcp_daemon_con_t con, const void * data, uint32_t len)
     assert(rwres == 5 + len);
 }
 
-void mcp_daemon_read(mcp_daemon_con_t con, void * data, uint32_t len)
+void mcpd_read(mcpd_con_t con, void * data, uint32_t len)
 {
     ssize_t rwres;
 
@@ -109,6 +110,70 @@ void mcp_daemon_read(mcp_daemon_con_t con, void * data, uint32_t len)
     rwres = writev(con, v, 2);
     assert(rwres == 5);
 
-    rwres = mcp_daemon_util_full_read(con, data, len);
+    rwres = mcpd_util_full_read(con, data, len);
     assert(rwres == len);
+}
+
+int mcpd_gpio_acquire(mcpd_con_t con, unsigned socketno, unsigned pinno)
+{
+    ssize_t rwres;
+
+    uint8_t buf[] = {OPERATION_GPIO_ACQUIRE, socketno, pinno};
+
+    rwres = write(con, buf, sizeof(buf));
+    assert(rwres == sizeof(buf));
+
+    rwres = read(con, buf, 1);
+    assert(rwres > 0);
+
+    if(buf[0] == 255) return MCPD_RESOURCE_UNAVAILABLE;
+    return buf[0];
+}
+
+void mcpd_gpio_set(mcpd_con_t con, unsigned gpio_id, bool en)
+{
+    ssize_t rwres;
+
+    uint8_t buf[] = {OPERATION_GPIO_SET, gpio_id, en};
+
+    rwres = write(con, buf, sizeof(buf));
+    assert(rwres == sizeof(buf));
+}
+
+int mcpd_resource_acquire(mcpd_con_t con, mcpd_pins_type_t type)
+{
+    ssize_t rwres;
+
+    uint8_t buf[] = {OPERATION_RESOURCE_ACQUIRE, type};
+
+    rwres = write(con, buf, sizeof(buf));
+    assert(rwres == sizeof(buf));
+
+    rwres = read(con, buf, 1);
+    assert(rwres > 0);
+
+    if(buf[0] == 255) return MCPD_RESOURCE_UNAVAILABLE;
+    return buf[0];
+}
+
+int mcpd_resource_route(mcpd_con_t con, unsigned resource_id, unsigned io_type,
+    unsigned socketno, unsigned pinno)
+{
+    ssize_t rwres;
+
+    uint8_t buf[] = {OPERATION_RESOURCE_ROUTE, resource_id, io_type, socketno, pinno};
+
+    rwres = write(con, buf, sizeof(buf));
+    assert(rwres == sizeof(buf));
+
+    rwres = read(con, buf, 1);
+    assert(rwres > 0);
+
+    return -buf[0];
+}
+
+const char * mcpd_resource_get_path(mcpd_con_t con, unsigned resource_id)
+{
+    if(resource_id >= MCP_PINS_COUNT) return NULL;
+    return mcp_pins[resource_id].path;
 }
