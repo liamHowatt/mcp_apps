@@ -20,6 +20,6 @@
 #define OPERATION_RESOURCE_ROUTE   6
 
 #define SOC_PATH "mcpd"
-#define SOC_WAITER_FIFO "mcpd_"
+#define SOC_WAITER_FIFO "/mcpd_"
 
 ssize_t mcpd_util_full_read(int fd, void * buf, size_t count);

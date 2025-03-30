@@ -60,7 +60,11 @@ int mcp_forth_main(int argc, char *argv[])
         m4_runtime_lib_io,
         m4_runtime_lib_string,
         m4_runtime_lib_time,
+        m4_runtime_lib_assert,
         M4_RUNTIME_LIB_ENTRY_MCPD
+        M4_RUNTIME_LIB_ENTRY_SPI
+        m4_runtime_lib_unix,
+        m4_runtime_lib_malloc,
         NULL
     };
 

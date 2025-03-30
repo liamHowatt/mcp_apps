@@ -58,7 +58,7 @@ const m4_runtime_cb_array_t m4_runtime_lib_mcpd[] = {
     {"mcpd_gpio_set", {m4_f03, mcpd_gpio_set}},
 
     {"mcpd_resource_acquire", {m4_f12, mcpd_resource_acquire}},
-    {"mcpd_resource_route", {m4_f14, mcpd_resource_route}},
+    {"mcpd_resource_route", {m4_f15, mcpd_resource_route}},
     {"mcpd_resource_get_path", {m4_f12, mcpd_resource_get_path}},
 
 
