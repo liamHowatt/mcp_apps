@@ -563,6 +563,20 @@ int mcpd_main(int argc, char *argv[])
 
     do_write(&s.s0.pin_soc, 255); /* assign me a token */
     uint8_t my_token = do_read(&s.s0.pin_soc);
+
+    do_write(&s.s0.pin_soc, MMN_SRV_OPCODE_GETINFO);
+    uint8_t info_count = do_read(&s.s0.pin_soc);
+    if(info_count > 0) {
+        uint8_t us = do_read(&s.s0.pin_soc);
+        if(us != 255) {
+            res = ioctl(s.s0.pin_soc.tim_fd, TCIOC_SETTIMEOUT, us);
+            assert(res == 0);
+            res = ioctl(s.s1.pin_soc.tim_fd, TCIOC_SETTIMEOUT, us);
+            assert(res == 0);
+        }
+        while(--info_count) do_read(&s.s0.pin_soc);
+    }
+
     do_write(&s.s1.pin_soc, my_token); /* associate with other socket */
 
     run_socket(&s.s0.pin_soc, my_token);
