@@ -522,6 +522,9 @@ static int op_unlink(FAR void *volinfo, FAR const char *relpath)
     mcpd_write(con, buf, 2);
     mcpd_write(con, p, filename_len);
     mcpd_read(con, buf, 1);
+
+    mcpd_disconnect(con);
+
     switch(buf[0]) {
         case 0: break;
         case 1: return -EIO;
@@ -530,8 +533,6 @@ static int op_unlink(FAR void *volinfo, FAR const char *relpath)
         case 4: return -ENAMETOOLONG;
         default: assert(0);
     }
-
-    mcpd_disconnect(con);
 
     return 0;
 }

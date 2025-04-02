@@ -3,12 +3,16 @@
 #include <stdint.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 #include "mcp_forth/mcp_forth.h"
 #include "bindings/bindings.h"
 
 int mcp_forth_main(int argc, char *argv[])
 {
+    int res;
+    ssize_t rwres;
+
     if(argc != 2) {
         fprintf(stderr, "usage: mcp_forth <file path>\n");
         return 1;
@@ -20,31 +24,19 @@ int mcp_forth_main(int argc, char *argv[])
         return 1;
     }
 
-    char * buf = NULL;
-    size_t buf_len = 0;
-    size_t buf_cap = 0;
-    while(1) {
-        if(buf_len == buf_cap) {
-            buf_cap += 256;
-            buf = realloc(buf, buf_cap);
-            assert(buf);
-        }
-        size_t read_amt = buf_cap - buf_len;
-        ssize_t br = read(fd, buf + buf_len, read_amt);
-        if(br < 0) {
-            perror("read");
-            free(buf);
-            return 1;
-        }
-        if(br == 0) {
-            break;
-        }
-        buf_len += br;
-    }
+    struct stat st;
+    res = fstat(fd, &st);
+    assert(res == 0);
+    ssize_t buf_len = st.st_size;
+    assert(buf_len > 0);
 
-    close(fd);
+    char * buf = malloc(buf_len);
+    assert(buf);
+    rwres = read(fd, buf, buf_len);
+    assert(rwres == buf_len);
 
-    buf = realloc(buf, buf_len);
+    res = close(fd);
+    assert(res == 0);
 
     uint8_t * bin;
     int error_near;
@@ -71,7 +63,7 @@ int mcp_forth_main(int argc, char *argv[])
     uint8_t * memory = malloc(2048);
     assert(memory);
     const char * missing_word;
-    int res = m4_vm_engine_run(
+    res = m4_vm_engine_run(
         bin,
         bin_len,
         memory,

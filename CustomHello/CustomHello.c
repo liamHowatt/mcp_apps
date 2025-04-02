@@ -1,13 +1,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include <mcp/mcp_lvgl.h>
+
 int custom_hello_main(int argc, char *argv[])
 {
-    puts("custom hello");
+    if(argc < 2) return 1;
 
-    char * peer = getenv("MCP_PEER");
-    if(peer == NULL) peer = "NULL";
-    printf("peer: '%s'\n", peer);
+    mcp_lvgl_queue_t q = mcp_lvgl_queue_open();
+    mcp_lvgl_queue_send(q, argv[1]);
+    mcp_lvgl_queue_close(q);
 
     return 0;
 }

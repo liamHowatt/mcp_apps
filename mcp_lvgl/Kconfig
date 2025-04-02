@@ -6,6 +6,7 @@
 config MCP_APPS_MCP_LVGL
         tristate "MCP LVGL App"
         default n
+        depends on GRAPHICS_LVGL && MCP_APPS_MCP_FORTH
         ---help---
                 Enable the MCP LVGL App
 
@@ -24,6 +25,6 @@ config MCP_APPS_MCP_LVGL_PRIORITY
 
 config MCP_APPS_MCP_LVGL_STACKSIZE
         int "MCP LVGL stack size"
-        default DEFAULT_TASK_STACKSIZE
+        default 32768
 
 endif

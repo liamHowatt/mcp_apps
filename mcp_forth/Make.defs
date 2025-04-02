@@ -1,3 +1,5 @@
 ifneq ($(CONFIG_MCP_APPS_MCP_FORTH),)
 CONFIGURED_APPS += $(APPDIR)/mcp_apps/mcp_forth
+CFLAGS += ${INCDIR_PREFIX}${APPDIR}/mcp_apps/mcp_forth/include
+CXXFLAGS += ${INCDIR_PREFIX}${APPDIR}/mcp_apps/mcp_forth/include
 endif
