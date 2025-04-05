@@ -13,6 +13,11 @@ extern "C" {
 #define MCPD_BUSY         -2
 #define MCPD_RESOURCE_UNAVAILABLE -3
 #define MCPD_BAD_REQUEST  -4
+#define MCPD_ENV_NOT_SET  -5
+#define MCPD_PROTOCOL_NOT_SUP -6
+#define MCPD_IOERROR      -7
+#define MCPD_NOENT        -8
+#define MCPD_NAMETOOLONG  -9
 
 #define MCPD_CON_NULL     -1
 
@@ -31,6 +36,8 @@ int mcpd_resource_acquire(mcpd_con_t con, mcpd_pins_type_t type);
 int mcpd_resource_route(mcpd_con_t con, unsigned resource_id, unsigned io_type,
     unsigned socketno, unsigned pinno);
 const char * mcpd_resource_get_path(mcpd_con_t con, unsigned resource_id);
+
+int mcpd_file_hash(mcpd_con_t con, const char * file_name, uint8_t * hash_32_byte_dst);
 
 #ifdef __cplusplus
 } /*extern "C"*/

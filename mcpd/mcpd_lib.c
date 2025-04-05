@@ -177,3 +177,38 @@ const char * mcpd_resource_get_path(mcpd_con_t con, unsigned resource_id)
     if(resource_id >= MCP_PINS_COUNT) return NULL;
     return mcp_pins[resource_id].path;
 }
+
+int mcpd_file_hash(mcpd_con_t con, const char * file_name, uint8_t * hash_32_byte_dst)
+{
+    uint8_t byte;
+
+    size_t file_name_len = strlen(file_name);
+    if(file_name_len > 255) {
+        return MCPD_NAMETOOLONG;
+    }
+
+    byte = 2; /* hash protocol */
+    mcpd_write(con, &byte, 1);
+    mcpd_read(con, &byte, 1);
+    if(byte) {
+        return MCPD_PROTOCOL_NOT_SUP;
+    }
+
+    byte = file_name_len;
+    mcpd_write(con, &byte, 1);
+    mcpd_write(con, file_name, file_name_len);
+
+    mcpd_read(con, &byte, 1);
+
+    switch(byte) {
+        case 0: break;
+        case 1: return MCPD_IOERROR;
+        case 3: return MCPD_NOENT;
+        case 4: return MCPD_NAMETOOLONG;
+        default: assert(0);
+    }
+
+    mcpd_read(con, hash_32_byte_dst, 32);
+
+    return 0;
+}

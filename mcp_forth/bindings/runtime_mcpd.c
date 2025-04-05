@@ -5,9 +5,6 @@
 #include <stdlib.h>
 #include <stdint.h>
 
-#define MCPD_DRIVER_ENV_NOT_SET       -1000
-#define MCPD_DRIVER_PROTOCOL_NOT_SUP  -1001
-
 static int mcpd_driver_connect(void * param, m4_stack_t * stack)
 {
     if(!(stack->len + 2 <= stack->max)) return M4_STACK_OVERFLOW_ERROR;
@@ -17,7 +14,7 @@ static int mcpd_driver_connect(void * param, m4_stack_t * stack)
     int res;
     char * peer_str = getenv("MCP_PEER");
     if(peer_str == NULL) {
-        stack->data[-1] = MCPD_DRIVER_ENV_NOT_SET;
+        stack->data[-1] = MCPD_ENV_NOT_SET;
         return 0;
     }
     int peer = atoi(peer_str);
@@ -32,7 +29,7 @@ static int mcpd_driver_connect(void * param, m4_stack_t * stack)
     mcpd_read(con, &byte, 1);
     if(byte != 0) {
         mcpd_disconnect(con);
-        stack->data[-1] = MCPD_DRIVER_PROTOCOL_NOT_SUP;
+        stack->data[-1] = MCPD_PROTOCOL_NOT_SUP;
         return 0;
     }
     stack->data[-2] = (int) con;
@@ -46,6 +43,11 @@ const m4_runtime_cb_array_t m4_runtime_lib_mcpd[] = {
     {"mcpd_busy", {m4_lit, (void *) (MCPD_BUSY)}},
     {"mcpd_resource_unavailable", {m4_lit, (void *) (MCPD_RESOURCE_UNAVAILABLE)}},
     {"mcpd_bad_request", {m4_lit, (void *) (MCPD_BAD_REQUEST)}},
+    {"mcpd_env_not_set", {m4_lit, (void *) (MCPD_ENV_NOT_SET)}},
+    {"mcpd_protocol_not_sup", {m4_lit, (void *) (MCPD_PROTOCOL_NOT_SUP)}},
+    {"mcpd_ioerror", {m4_lit, (void *) (MCPD_IOERROR)}},
+    {"mcpd_noent", {m4_lit, (void *) (MCPD_NOENT)}},
+    {"mcpd_nametoolong", {m4_lit, (void *) (MCPD_NAMETOOLONG)}},
     {"mcpd_con_null", {m4_lit, (void *) (MCPD_CON_NULL)}},
 
     {"mcpd_connect", {m4_f12, mcpd_connect}},
@@ -61,11 +63,10 @@ const m4_runtime_cb_array_t m4_runtime_lib_mcpd[] = {
     {"mcpd_resource_route", {m4_f15, mcpd_resource_route}},
     {"mcpd_resource_get_path", {m4_f12, mcpd_resource_get_path}},
 
+    {"mcpd_file_hash", {m4_f13, mcpd_file_hash}},
+
 
     /*extensions*/
-    {"mcpd_driver_env_not_set", {m4_lit, (void *) (MCPD_DRIVER_ENV_NOT_SET)}},
-    {"mcpd_driver_protocol_not_sup", {m4_lit, (void *) (MCPD_DRIVER_PROTOCOL_NOT_SUP)}},
-
     {"mcpd_driver_connect", {mcpd_driver_connect}},
 
 
