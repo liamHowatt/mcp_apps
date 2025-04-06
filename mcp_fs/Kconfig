@@ -6,7 +6,7 @@
 config MCP_APPS_MCP_FS
         tristate "MCP FS App"
         default n
-        depends on NET_LOCAL && MCP_APPS_MCPD && FS_USERFS && NET_LOOPBACK_PKTSIZE >= 16384 && SCHED_LPWORK
+        depends on NET_LOCAL && MCP_APPS_MCPD && FS_USERFS && NET_LOOPBACK_PKTSIZE >= 16384 && SCHED_LPWORK && FS_NAMED_SEMAPHORES
         ---help---
                 Enable the MCP FS App
 

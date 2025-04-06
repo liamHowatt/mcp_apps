@@ -5,8 +5,8 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
-#include "mcp_forth/mcp_forth.h"
-#include "bindings/bindings.h"
+#include <mcp/mcp_forth.h>
+#include <mcp/mcp_fs.h>
 
 int mcp_forth_main(int argc, char *argv[])
 {
@@ -18,17 +18,26 @@ int mcp_forth_main(int argc, char *argv[])
         return 1;
     }
 
-    int fd = open(argv[1], O_RDONLY);
+    char * path = argv[1];
+    char * cachepath = mcp_fs_cache_file(path);
+    if(cachepath) {
+        path = cachepath;
+    }
+
+    int fd = open(path, O_RDONLY);
     if(fd == -1) {
         perror("open");
+        free(cachepath);
         return 1;
     }
+
+    free(cachepath);
 
     struct stat st;
     res = fstat(fd, &st);
     assert(res == 0);
     ssize_t buf_len = st.st_size;
-    assert(buf_len > 0);
+    assert(buf_len >= 0);
 
     char * buf = malloc(buf_len);
     assert(buf);
@@ -53,10 +62,7 @@ int mcp_forth_main(int argc, char *argv[])
         m4_runtime_lib_string,
         m4_runtime_lib_time,
         m4_runtime_lib_assert,
-        M4_RUNTIME_LIB_ENTRY_MCPD
-        M4_RUNTIME_LIB_ENTRY_SPI
-        m4_runtime_lib_unix,
-        m4_runtime_lib_malloc,
+        M4_RUNTIME_LIB_MCP_ALL_ENTRIES
         NULL
     };
 

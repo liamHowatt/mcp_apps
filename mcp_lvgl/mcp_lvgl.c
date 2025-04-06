@@ -8,6 +8,7 @@
 
 #include <mcp/mcp_lvgl.h>
 #include <mcp/mcp_forth.h>
+#include <mcp/mcp_fs.h>
 
 #include <lvgl/lvgl.h>
 
@@ -47,17 +48,25 @@ static void load_forth_driver(const char * path, void ** driver_bin, void ** dri
     int res;
     ssize_t rwres;
 
+    char * cachepath = mcp_fs_cache_file(path);
+    if(cachepath) {
+        path = cachepath;
+    }
+
     int fd = open(path, O_RDONLY);
     if(fd == -1) {
         perror("open");
+        free(cachepath);
         exit(1);
     }
+
+    free(cachepath);
 
     struct stat st;
     res = fstat(fd, &st);
     assert(res == 0);
     ssize_t buf_len = st.st_size;
-    assert(buf_len > 0);
+    assert(buf_len >= 0);
 
     char * buf = malloc(buf_len);
     assert(buf);
@@ -82,10 +91,7 @@ static void load_forth_driver(const char * path, void ** driver_bin, void ** dri
         m4_runtime_lib_string,
         m4_runtime_lib_time,
         m4_runtime_lib_assert,
-        M4_RUNTIME_LIB_ENTRY_MCPD
-        M4_RUNTIME_LIB_ENTRY_SPI
-        m4_runtime_lib_unix,
-        m4_runtime_lib_malloc,
+        M4_RUNTIME_LIB_MCP_ALL_ENTRIES
         runtime_lib_lvgl,
         NULL
     };
@@ -152,6 +158,8 @@ int mcp_lvgl_main(int argc, char *argv[])
         if(time_til_next == LV_NO_TIMER_READY) break;
         usleep(time_til_next * 1000);
     }
+
+    lv_deinit();
 
     free(driver_memory);
     free(driver_bin);

@@ -4,6 +4,8 @@
 #include "mcp/mcpd.h"
 #include <stdlib.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <assert.h>
 
 static int mcpd_driver_connect(void * param, m4_stack_t * stack)
 {
@@ -34,6 +36,30 @@ static int mcpd_driver_connect(void * param, m4_stack_t * stack)
     }
     stack->data[-2] = (int) con;
     stack->data[-1] = MCPD_OK;
+    return 0;
+}
+
+static int mcpd_peer_id(void * param, m4_stack_t * stack)
+{
+    if(!(stack->len < stack->max)) return M4_STACK_OVERFLOW_ERROR;
+    char * peer_str = getenv("MCP_PEER");
+    stack->data[0] = peer_str !=  NULL ? atoi(peer_str) : MCPD_ENV_NOT_SET;
+    stack->data += 1;
+    stack->len += 1;
+    return 0;
+}
+
+static int mcpd_acatpath(void * param, m4_stack_t * stack)
+{
+    if(!(stack->len)) return M4_STACK_UNDERFLOW_ERROR;
+    char ** strp = (char **) stack->data - 1;
+    char * peer_str = getenv("MCP_PEER");
+    if(peer_str == NULL) {
+        *strp = NULL;
+        return 0;
+    }
+    int res = asprintf(strp, "/mnt/mcp/%d/%s", atoi(peer_str), *strp);
+    assert(res != -1);
     return 0;
 }
 
@@ -68,6 +94,8 @@ const m4_runtime_cb_array_t m4_runtime_lib_mcpd[] = {
 
     /*extensions*/
     {"mcpd_driver_connect", {mcpd_driver_connect}},
+    {"mcpd_peer_id", {mcpd_peer_id}},
+    {"mcpd_acatpath", {mcpd_acatpath}},
 
 
     {NULL}

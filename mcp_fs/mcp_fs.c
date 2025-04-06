@@ -1,3 +1,4 @@
+#include <mcp/mcp_fs.h>
 #include <mcp/mcpd.h>
 #include <nuttx/fs/userfs.h>
 #include <string.h>
@@ -7,6 +8,12 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <fcntl.h>
+#include <semaphore.h>
+#include <sys/stat.h>
+#include <sys/sendfile.h>
+
+#define MNT_MCP "/mnt/mcp/"
+#define MNT_CACHE "/data/"
 
 #define FS_BASE_ACTION_WRITE      0
 #define FS_BASE_ACTION_READ       1
@@ -38,6 +45,22 @@ typedef struct {
     int cursor;
     char fnames[];
 } dir_t;
+
+static const uint8_t sha256_emptyfile[32] = {
+    0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14,
+    0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f, 0xb9, 0x24,
+    0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c,
+    0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55
+};
+
+static void raw_to_hex(char * dst, const uint8_t * src, size_t len) {
+    for(size_t i = 0; i < len; i++) {
+        char buf[3];
+        sprintf(buf, "%02x", (unsigned) src[i]);
+        dst[i*2] = buf[0];
+        dst[i*2 + 1] = buf[1];
+    }
+}
 
 static peer_t * volinfo_ensure_peer(volinfo_t * vinfo, int peer_id)
 {
@@ -668,4 +691,95 @@ int mcp_fs_main(int argc, char *argv[])
     assert(vinfo.was_destroyed);
 
     return 0;
+}
+
+char * mcp_fs_cache_file(const char * file_path)
+{
+    int res;
+    ssize_t rwres;
+
+    struct stat st;
+
+    char * ret = NULL;
+
+    char * fullpath = NULL;
+    sem_t * sem = SEM_FAILED;
+
+    fullpath = realpath(file_path, NULL);
+    if(fullpath == NULL) goto free_ret;
+    size_t fullpath_len = strlen(fullpath);
+    if(fullpath_len < sizeof(MNT_MCP) - 1
+       || 0 != memcmp(fullpath, MNT_MCP, sizeof(MNT_MCP) - 1)) {
+        goto free_ret;
+    }
+
+    const char * p = fullpath + (sizeof(MNT_MCP) - 1);
+    int peer_id = decode_path(&p);
+    if(peer_id < 0) goto free_ret;
+
+    mcpd_con_t con;
+    res = mcpd_connect(&con, peer_id);
+    if(res) goto free_ret;
+    uint8_t hash[32];
+    res = mcpd_file_hash(con, p, hash);
+    mcpd_disconnect(con);
+    if(res) goto free_ret;
+
+    char cachepath[(sizeof(MNT_CACHE) - 1) + 64 + 1];
+    memcpy(cachepath, MNT_CACHE, sizeof(MNT_CACHE) - 1);
+    raw_to_hex(cachepath + (sizeof(MNT_CACHE) - 1), hash, 32);
+    cachepath[sizeof(cachepath) - 1] = '\0';
+
+    char * hash_hex = cachepath + (sizeof(MNT_CACHE) - 1);
+
+    sem = sem_open(hash_hex, O_CREAT, 0666, 1);
+    assert(sem != SEM_FAILED);
+    res = sem_wait(sem);
+    assert(res == 0);
+
+    res = stat(cachepath, &st);
+    if(res == 0 && (st.st_size != 0
+                    || 0 == memcmp(hash, sha256_emptyfile, 32))) {
+        goto success_post_free_ret;
+    }
+    assert(res == 0 || errno == ENOENT);
+
+    int cfd = open(cachepath, O_WRONLY | O_CREAT, 0666);
+    if(cfd < 0) goto post_free_ret;
+
+    int mfd = open(file_path, O_RDONLY);
+    if(mfd < 0) {
+        close(cfd);
+        unlink(cachepath);
+        goto post_free_ret;
+    }
+
+    res = fstat(mfd, &st);
+    assert(res == 0); /* should not fail */
+    ssize_t mfile_size = st.st_size;
+    assert(mfile_size >= 0);
+
+    rwres = sendfile(cfd, mfd, NULL, mfile_size);
+    assert(0 == close(mfd));
+    if(rwres != mfile_size) {
+        assert(0 == ftruncate(cfd, 0));
+        close(cfd);
+        unlink(cachepath);
+        goto post_free_ret;
+    }
+
+    res = close(cfd);
+    if(res) {
+        unlink(cachepath);
+        goto post_free_ret;
+    }
+
+success_post_free_ret:
+    ret = strdup(cachepath);
+post_free_ret:
+    assert(0 == sem_post(sem));
+free_ret:
+    free(fullpath);
+    if(sem != SEM_FAILED) assert(0 == sem_close(sem));
+    return ret;
 }
