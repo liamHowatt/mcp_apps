@@ -20,6 +20,7 @@ CSRCS += mcp_forth/runtime_time.c
 CSRCS += mcp_forth/runtime_assert.c
 CSRCS += bindings/runtime_mcpd.c
 CSRCS += bindings/runtime_spi.c
+CSRCS += bindings/runtime_input.c
 CSRCS += bindings/runtime_mcp_lvgl.c
 CSRCS += bindings/runtime_unix.c
 CSRCS += bindings/runtime_malloc.c

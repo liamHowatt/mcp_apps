@@ -5,6 +5,10 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <sys/stat.h>
+#include <poll.h>
+#include <nuttx/input/keyboard.h>
+#include <nuttx/input/touchscreen.h>
+#include <errno.h>
 
 #include <mcp/mcp_lvgl.h>
 #include <mcp/mcp_forth.h>
@@ -13,6 +17,11 @@
 #include <lvgl/lvgl.h>
 
 #include "runtime_lvgl.h"
+
+typedef struct {
+    uint32_t key;
+    lv_indev_state_t state;
+} keypad_data_t;
 
 static mqd_t inner_open(int oflag)
 {
@@ -132,6 +141,38 @@ static uint32_t millis(void)
     return tick;
 }
 
+static void make_enc_kpd_group(void)
+{
+    lv_group_t * g = lv_group_create();
+    lv_group_set_default(g);
+
+    lv_indev_t * indev = NULL;
+    while((indev = lv_indev_get_next(indev))) {
+        lv_indev_set_group(indev, g);
+    }
+}
+
+// static void indev_cb(lv_indev_t * indev, lv_indev_data_t * data)
+// {
+//     data->key = LV_KEY_DOWN;
+
+//     uint32_t tick = lv_tick_get();
+//     static uint32_t next;
+//     static bool toggle;
+//     if(tick > next) {
+//         next = tick + 200;
+//         toggle = !toggle;
+//     }
+//     data->state = toggle ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+// }
+
+static void keypad_cb(lv_indev_t * indev, lv_indev_data_t * data)
+{
+    keypad_data_t * keypad_data = lv_indev_get_user_data(indev);
+    data->key = keypad_data->key;
+    data->state = keypad_data->state;
+}
+
 int mcp_lvgl_main(int argc, char *argv[])
 {
     ssize_t rwres;
@@ -149,20 +190,86 @@ int mcp_lvgl_main(int argc, char *argv[])
     void * driver_memory;
     load_forth_driver(msg, &driver_bin, &driver_memory);
 
-    lv_obj_t * label = lv_label_create(lv_screen_active());
-    lv_label_set_text_static(label, "Hello Modular Phone!");
-    lv_obj_center(label);
+    make_enc_kpd_group();
+
+    lv_obj_t * scr = lv_screen_active();
+
+    lv_obj_t * list = lv_list_create(scr);
+    lv_gridnav_add(list, LV_GRIDNAV_CTRL_NONE);
+    lv_group_add_obj(lv_group_get_default(), list);
+    lv_obj_set_size(list, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_radius(list, 0, 0);
+    lv_obj_set_style_border_width(list, 0, 0);
+    for(int i = 1; i <= 20; i++) {
+        char buf[3];
+        sprintf(buf, "%d", i);
+        lv_obj_t * btn = lv_list_add_button(list, NULL, buf);
+        lv_group_remove_obj(btn);
+    }
+
+    int keypad_fd = open("/dev/ukeyboard", O_RDONLY | O_NONBLOCK);
+    assert(keypad_fd >= 0);
+
+    struct pollfd pfd[1] = {{.fd = keypad_fd, .events = POLLIN}};
+
+    lv_indev_t * keypad_indev = NULL;
+    keypad_data_t keypad_data;
 
     while (1) {
         uint32_t time_til_next = lv_timer_handler();
-        if(time_til_next == LV_NO_TIMER_READY) break;
-        usleep(time_til_next * 1000);
+        int timeout = time_til_next == LV_NO_TIMER_READY ? -1 : time_til_next;
+        int event_count = poll(pfd, sizeof(pfd) / sizeof(*pfd), timeout);
+        assert(event_count >= 0);
+        if(!event_count) continue;
+
+        assert(pfd[0].revents == POLLIN);
+        if(keypad_indev == NULL) {
+            keypad_indev = lv_indev_create();
+            lv_indev_set_type(keypad_indev, LV_INDEV_TYPE_KEYPAD);
+            lv_indev_set_read_cb(keypad_indev, keypad_cb);
+            lv_indev_set_group(keypad_indev, lv_group_get_default());
+            lv_indev_set_mode(keypad_indev, LV_INDEV_MODE_EVENT);
+            lv_indev_set_user_data(keypad_indev, &keypad_data);
+        }
+        bool once = false;
+        struct keyboard_event_s keypad_event;
+        while(sizeof(keypad_event) == (rwres = read(keypad_fd, &keypad_event, sizeof(keypad_event)))) {
+            once = true;
+            switch(keypad_event.code) {
+                case 103: /* KEY_UP */
+                    keypad_data.key = LV_KEY_UP;
+                    break;
+                case 108: /* KEY_DOWN */
+                    keypad_data.key = LV_KEY_DOWN;
+                    break;
+                default:
+                    continue;
+            }
+            switch(keypad_event.type) {
+                case KEYBOARD_PRESS:
+                    keypad_data.state = LV_INDEV_STATE_PRESSED;
+                    break;
+                case KEYBOARD_RELEASE:
+                    keypad_data.state = LV_INDEV_STATE_RELEASED;
+                    break;
+                default:
+                    continue;
+            }
+            lv_indev_read(keypad_indev);
+        }
+        assert(rwres < 0 && (errno == EAGAIN || errno == EWOULDBLOCK));
+        assert(once);
+
     }
 
     lv_deinit();
 
     free(driver_memory);
     free(driver_bin);
+
+    assert(0 == close(keypad_fd));
+
+    mcp_lvgl_queue_close(mq);
 
     puts("mcp_lvgl exited");
     return 0;
