@@ -19,9 +19,9 @@ extern "C" {
 #define MCPD_NOENT        -8
 #define MCPD_NAMETOOLONG  -9
 
-#define MCPD_CON_NULL     -1
+#define MCPD_CON_NULL     NULL
 
-typedef int mcpd_con_t;
+typedef struct mcpd_con_s * mcpd_con_t;
 
 int mcpd_connect(mcpd_con_t * con_dst, int peer_id);
 void mcpd_disconnect(mcpd_con_t con);
@@ -32,7 +32,8 @@ void mcpd_read(mcpd_con_t con, void * data, uint32_t len);
 int mcpd_gpio_acquire(mcpd_con_t con, unsigned socketno, unsigned pinno);
 void mcpd_gpio_set(mcpd_con_t con, unsigned gpio_id, bool en);
 
-int mcpd_resource_acquire(mcpd_con_t con, mcpd_pins_type_t type);
+int mcpd_resource_acquire(mcpd_con_t conp, mcpd_pins_periph_type_t periph_type,
+    mcpd_pins_driver_type_t driver_type);
 int mcpd_resource_route(mcpd_con_t con, unsigned resource_id, unsigned io_type,
     unsigned socketno, unsigned pinno);
 const char * mcpd_resource_get_path(mcpd_con_t con, unsigned resource_id);

@@ -1,3 +1,5 @@
+#include <nuttx/config.h>
+
 #include "mcp_board/mcp_bitbang/mcp_bitbang_client.h"
 #include "mcp_board/mcp_modnet/mcp_modnet_server.h"
 
@@ -23,6 +25,7 @@
 
 #include "mcpd_private.h"
 #include <arch/board/mcp/mcp_pins_array.h>
+#include <arch/board/boardctl.h>
 
 #define POLLFDS_PEER_START 2
 
@@ -89,8 +92,26 @@ typedef struct {
     master_socket_sm_t s0;
     poller_socket_sm_t s1;
     int sfd;
-    uint8_t pin_owners[MCP_PINS_COUNT];
+    uint8_t pin_periph_owners[MCP_PINS_PERIPH_COUNT];
+    uint8_t pin_driver_active[MCP_PINS_PERIPH_COUNT];
 } socket_sms_t;
+
+static unsigned periph_last_driver(unsigned periph) {
+    switch(periph) {
+        case MCP_PINS_PERIPH_TYPE_SPI: return MCP_PINS_DRIVER_TYPE_SPI_LAST_;
+    }
+    return 0;
+}
+
+static const char * pins_str(unsigned periph, unsigned driver) {
+    switch(periph) {
+        case MCP_PINS_PERIPH_TYPE_SPI: switch(driver) {
+            case MCP_PINS_DRIVER_TYPE_SPI_RAW: return "spi";
+            case MCP_PINS_DRIVER_TYPE_SPI_SDCARD: return "mmcsd";
+        }
+    }
+    return NULL;
+}
 
 static void pin_set(pin_socket_ctx_t * ctx, mbb_cli_pin_t pinno, bool val) {
     int res;
@@ -604,7 +625,8 @@ int mcpd_main(int argc, char *argv[])
     s.sfd = signalfd(-1, &set, SFD_CLOEXEC);
     assert(s.sfd >= 0);
 
-    memset(s.pin_owners, 255, sizeof(s.pin_owners));
+    memset(s.pin_periph_owners, 255, sizeof(s.pin_periph_owners));
+    memset(s.pin_driver_active, 255, sizeof(s.pin_driver_active));
 
     // nonblock is so `accept` doesn't block
     int srv = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
@@ -775,8 +797,8 @@ int mcpd_main(int argc, char *argv[])
 
                 pfd->fd = -1;
 
-                for(uint32_t i = 0; i < MCP_PINS_COUNT; i++) {
-                    if(s.pin_owners[i] == pd->token) s.pin_owners[i] = 255;
+                for(uint32_t i = 0; i < MCP_PINS_PERIPH_COUNT; i++) {
+                    if(s.pin_periph_owners[i] == pd->token) s.pin_periph_owners[i] = 255;
                 }
 
                 for(uint32_t i = 0; i < pd->resource_count; i++) {
@@ -847,20 +869,49 @@ int mcpd_main(int argc, char *argv[])
                 } while(0);
             }
             else if(operation == OPERATION_RESOURCE_ACQUIRE) {
-                uint8_t type;
-                rwres = read(pfd->fd, &type, 1);
+                uint8_t resp = 255;
+#if defined(CONFIG_BOARDCTL_IOCTL) && defined(CONFIG_MCP_PINS)
+                struct {uint8_t periph; uint8_t driver;} type;
+                rwres = mcpd_util_full_read(pfd->fd, &type, sizeof(type));
                 assert(rwres > 0);
-                uint32_t i;
-                for(i = 0; i < MCP_PINS_COUNT; i++)
-                    if(mcp_pins[i].type == type && s.pin_owners[i] == 0xff) break;
-                uint8_t resp;
-                if(i == MCP_PINS_COUNT) {
-                    resp = 255;
-                } else {
-                    assert(i < 255);
-                    resp = i;
-                    s.pin_owners[i] = pd->token;
+                int32_t choice = -1;
+                for(uint32_t i = 0; i < MCP_PINS_PERIPH_COUNT; i++) {
+                    if(mcp_pins[i].periph_type == type.periph
+                       && s.pin_periph_owners[i] == 0xff
+                       && (s.pin_driver_active[i] == 0xff
+                           || s.pin_driver_active[i] == type.driver)
+                    ) {
+                        if(s.pin_driver_active[i] == type.driver) {
+                            choice = i;
+                            break;
+                        }
+                        else if(choice < 0) {
+                            choice = i;
+                        }
+                    }
                 }
+                
+                if(choice >= 0 && type.driver < periph_last_driver(type.periph)) {
+                    assert(choice < 255);
+                    s.pin_periph_owners[choice] = pd->token;
+                    if(s.pin_driver_active[choice] == 0xff) {
+                        s.pin_driver_active[choice] = type.driver;
+                        struct mcp_pins_s arg = {
+                            .peripheral = type.periph,
+                            .driver = type.driver,
+                            .minor = mcp_pins[choice].minor_number
+                        };
+                        res = boardctl(BIOC_MCP_PINS, (uintptr_t) &arg);
+                        if(res == 0) {
+                            resp = choice;
+                        } else {
+                            perror("boardctl(BIOC_MCP_PINS)");
+                        }
+                    } else {
+                        resp = choice;
+                    }
+                }
+#endif /* defined(CONFIG_BOARDCTL_IOCTL) && defined(MCP_PINS) */
                 rwres = write(pfd->fd, &resp, 1);
                 assert(rwres > 0);
             }
@@ -870,8 +921,8 @@ int mcpd_main(int argc, char *argv[])
                 assert(rwres == sizeof(req));
                 uint8_t resp = 255;
                 do {
-                    if(req.pinno >= 4
-                       || req.resource_id >= MCP_PINS_COUNT || s.pin_owners[req.resource_id] != pd->token) {
+                    if(req.pinno >= 4 || req.resource_id >= MCP_PINS_PERIPH_COUNT
+                       || s.pin_periph_owners[req.resource_id] != pd->token) {
                         resp = -MCPD_BAD_REQUEST;
                         break;
                     }
@@ -883,7 +934,7 @@ int mcpd_main(int argc, char *argv[])
                     const mcp_pins_entry_t * entry = &mcp_pins[req.resource_id];
 
                     resp = -MCPD_BAD_REQUEST;
-                    if(entry->type == MCP_PINS_TYPE_SPI) { if(req.io_type >= MCP_PINS_SPI_LAST_) break; }
+                    if(entry->periph_type == MCP_PINS_PERIPH_TYPE_SPI) { if(req.io_type >= MCP_PINS_PIN_SPI_LAST_) break; }
                     else assert(0);
 
                     const mcp_pins_dsc_t * my_dsc = &entry->pins[req.io_type];
@@ -936,7 +987,34 @@ int mcpd_main(int argc, char *argv[])
                 rwres = write(pfd->fd, &resp, 1);
                 assert(rwres > 0);
             }
+            else if(operation == OPERATION_RESOURCE_GET_PATH) {
+                uint8_t resource_id;
+                rwres = read(pfd->fd, &resource_id, 1);
+                assert(rwres > 0);
+                uint8_t path_len = 0;
+                char path[14];
+                do {
+                    if(resource_id >= MCP_PINS_PERIPH_COUNT
+                       || s.pin_periph_owners[resource_id] != pd->token) {
+                        break;
+                    }
+                    uint8_t periph_type = mcp_pins[resource_id].periph_type;
+                    uint8_t driver_type = s.pin_driver_active[resource_id];
+                    const char * driver_str = pins_str(periph_type, driver_type);
+                    if(!driver_str) break;
+                    int minor_number = mcp_pins[resource_id].minor_number;
+                    res = snprintf(path, sizeof(path), "/dev/%s%d", driver_str, minor_number);
+                    assert(res > 0);
+                    assert(res < sizeof(path));
+                    path_len = res;
+                } while(0);
+                rwres = write(pfd->fd, &path_len, 1);
+                assert(rwres > 0);
+                rwres = write(pfd->fd, path, path_len);
+                assert(rwres == path_len);
+            }
             else {
+                assert(operation == OPERATION_READ || operation == OPERATION_WRITE);
 
                 pd->is_doing = operation;
 

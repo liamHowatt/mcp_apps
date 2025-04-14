@@ -9,9 +9,21 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdlib.h>
+#include <stddef.h>
 
 #include "mcpd_private.h"
-#include <arch/board/mcp/mcp_pins_array.h>
+
+struct resource_path_ent_s {
+    struct resource_path_ent_s * next;
+    uint8_t resource_id;
+    char path[];
+};
+
+struct mcpd_con_s {
+    int con;
+    struct resource_path_ent_s * resource_path_head;
+};
 
 int mcpd_connect(mcpd_con_t * con_dst, int peer_id)
 {
@@ -54,14 +66,21 @@ int mcpd_connect(mcpd_con_t * con_dst, int peer_id)
         return -ret;
     }
 
-    *con_dst = con;
+    mcpd_con_t conp = malloc(sizeof(*conp));
+    assert(conp);
+    conp->con = con;
+    conp->resource_path_head = NULL;
+
+    *con_dst = conp;
     return MCPD_OK;
 }
 
-void mcpd_disconnect(mcpd_con_t con)
+void mcpd_disconnect(mcpd_con_t conp)
 {
     int res;
     ssize_t rwres;
+
+    int con = conp->con;
 
     uint8_t operation = OPERATION_QUIT;
     rwres = write(con, &operation, 1);
@@ -74,11 +93,22 @@ void mcpd_disconnect(mcpd_con_t con)
 
     res = close(con);
     assert(res == 0);
+
+    struct resource_path_ent_s * path_ent = conp->resource_path_head;
+    while(path_ent) {
+        struct resource_path_ent_s * next = path_ent->next;
+        free(path_ent);
+        path_ent = next;
+    }
+
+    free(conp);
 }
 
-void mcpd_write(mcpd_con_t con, const void * data, uint32_t len)
+void mcpd_write(mcpd_con_t conp, const void * data, uint32_t len)
 {
     ssize_t rwres;
+
+    int con = conp->con;
 
     if(len == 0) return;
 
@@ -94,9 +124,11 @@ void mcpd_write(mcpd_con_t con, const void * data, uint32_t len)
     assert(rwres == 5 + len);
 }
 
-void mcpd_read(mcpd_con_t con, void * data, uint32_t len)
+void mcpd_read(mcpd_con_t conp, void * data, uint32_t len)
 {
     ssize_t rwres;
+
+    int con = conp->con;
 
     if(len == 0) return;
 
@@ -114,9 +146,11 @@ void mcpd_read(mcpd_con_t con, void * data, uint32_t len)
     assert(rwres == len);
 }
 
-int mcpd_gpio_acquire(mcpd_con_t con, unsigned socketno, unsigned pinno)
+int mcpd_gpio_acquire(mcpd_con_t conp, unsigned socketno, unsigned pinno)
 {
     ssize_t rwres;
+
+    int con = conp->con;
 
     uint8_t buf[] = {OPERATION_GPIO_ACQUIRE, socketno, pinno};
 
@@ -130,9 +164,11 @@ int mcpd_gpio_acquire(mcpd_con_t con, unsigned socketno, unsigned pinno)
     return buf[0];
 }
 
-void mcpd_gpio_set(mcpd_con_t con, unsigned gpio_id, bool en)
+void mcpd_gpio_set(mcpd_con_t conp, unsigned gpio_id, bool en)
 {
     ssize_t rwres;
+
+    int con = conp->con;
 
     uint8_t buf[] = {OPERATION_GPIO_SET, gpio_id, en};
 
@@ -140,11 +176,14 @@ void mcpd_gpio_set(mcpd_con_t con, unsigned gpio_id, bool en)
     assert(rwres == sizeof(buf));
 }
 
-int mcpd_resource_acquire(mcpd_con_t con, mcpd_pins_type_t type)
+int mcpd_resource_acquire(mcpd_con_t conp, mcpd_pins_periph_type_t periph_type,
+    mcpd_pins_driver_type_t driver_type)
 {
     ssize_t rwres;
 
-    uint8_t buf[] = {OPERATION_RESOURCE_ACQUIRE, type};
+    int con = conp->con;
+
+    uint8_t buf[] = {OPERATION_RESOURCE_ACQUIRE, periph_type, driver_type};
 
     rwres = write(con, buf, sizeof(buf));
     assert(rwres == sizeof(buf));
@@ -156,10 +195,12 @@ int mcpd_resource_acquire(mcpd_con_t con, mcpd_pins_type_t type)
     return buf[0];
 }
 
-int mcpd_resource_route(mcpd_con_t con, unsigned resource_id, unsigned io_type,
+int mcpd_resource_route(mcpd_con_t conp, unsigned resource_id, unsigned io_type,
     unsigned socketno, unsigned pinno)
 {
     ssize_t rwres;
+
+    int con = conp->con;
 
     uint8_t buf[] = {OPERATION_RESOURCE_ROUTE, resource_id, io_type, socketno, pinno};
 
@@ -172,13 +213,47 @@ int mcpd_resource_route(mcpd_con_t con, unsigned resource_id, unsigned io_type,
     return -buf[0];
 }
 
-const char * mcpd_resource_get_path(mcpd_con_t con, unsigned resource_id)
+const char * mcpd_resource_get_path(mcpd_con_t conp, unsigned resource_id)
 {
-    if(resource_id >= MCP_PINS_COUNT) return NULL;
-    return mcp_pins[resource_id].path;
+    ssize_t rwres;
+
+    int con = conp->con;
+
+    struct resource_path_ent_s ** entp = &conp->resource_path_head;
+    struct resource_path_ent_s * ent;
+    while((ent = *entp)) {
+        if(ent->resource_id == resource_id) {
+            return ent->path;
+        }
+        entp = &ent->next;
+    }
+
+    uint8_t buf[] = {OPERATION_RESOURCE_GET_PATH, resource_id};
+
+    rwres = write(con, buf, sizeof(buf));
+    assert(rwres == sizeof(buf));
+
+    uint8_t path_len;
+    rwres = read(con, &path_len, 1);
+    assert(rwres > 0);
+
+    if(path_len == 0) return NULL;
+
+    struct resource_path_ent_s * new_ent = malloc(offsetof(struct resource_path_ent_s, path) + path_len + 1);
+    assert(new_ent);
+    new_ent->next = NULL;
+    new_ent->resource_id = resource_id;
+
+    rwres = mcpd_util_full_read(con, new_ent->path, path_len);
+    assert(rwres == path_len);
+    new_ent->path[path_len] = '\0';
+
+    *entp = new_ent;
+
+    return new_ent->path;
 }
 
-int mcpd_file_hash(mcpd_con_t con, const char * file_name, uint8_t * hash_32_byte_dst)
+int mcpd_file_hash(mcpd_con_t conp, const char * file_name, uint8_t * hash_32_byte_dst)
 {
     uint8_t byte;
 
@@ -188,17 +263,17 @@ int mcpd_file_hash(mcpd_con_t con, const char * file_name, uint8_t * hash_32_byt
     }
 
     byte = 2; /* hash protocol */
-    mcpd_write(con, &byte, 1);
-    mcpd_read(con, &byte, 1);
+    mcpd_write(conp, &byte, 1);
+    mcpd_read(conp, &byte, 1);
     if(byte) {
         return MCPD_PROTOCOL_NOT_SUP;
     }
 
     byte = file_name_len;
-    mcpd_write(con, &byte, 1);
-    mcpd_write(con, file_name, file_name_len);
+    mcpd_write(conp, &byte, 1);
+    mcpd_write(conp, file_name, file_name_len);
 
-    mcpd_read(con, &byte, 1);
+    mcpd_read(conp, &byte, 1);
 
     switch(byte) {
         case 0: break;
@@ -208,7 +283,7 @@ int mcpd_file_hash(mcpd_con_t con, const char * file_name, uint8_t * hash_32_byt
         default: assert(0);
     }
 
-    mcpd_read(con, hash_32_byte_dst, 32);
+    mcpd_read(conp, hash_32_byte_dst, 32);
 
     return 0;
 }

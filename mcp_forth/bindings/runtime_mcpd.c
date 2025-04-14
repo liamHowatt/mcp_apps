@@ -1,7 +1,9 @@
 #include "bindings.h"
 
 #ifdef CONFIG_MCP_APPS_MCPD
-#include "mcp/mcpd.h"
+#include <mcp/mcpd.h>
+#include <arch/board/mcp/mcp_pins_defs.h>
+
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -85,11 +87,23 @@ const m4_runtime_cb_array_t m4_runtime_lib_mcpd[] = {
     {"mcpd_gpio_acquire", {m4_f13, mcpd_gpio_acquire}},
     {"mcpd_gpio_set", {m4_f03, mcpd_gpio_set}},
 
-    {"mcpd_resource_acquire", {m4_f12, mcpd_resource_acquire}},
+    {"mcpd_resource_acquire", {m4_f13, mcpd_resource_acquire}},
     {"mcpd_resource_route", {m4_f15, mcpd_resource_route}},
     {"mcpd_resource_get_path", {m4_f12, mcpd_resource_get_path}},
 
     {"mcpd_file_hash", {m4_f13, mcpd_file_hash}},
+
+
+    /* resources */
+    {"mcp_pins_periph_type_spi", {m4_lit, (void *) MCP_PINS_PERIPH_TYPE_SPI}},
+
+    {"mcp_pins_driver_type_spi_raw", {m4_lit, (void *) MCP_PINS_DRIVER_TYPE_SPI_RAW}},
+    {"mcp_pins_driver_type_spi_sdcard", {m4_lit, (void *) MCP_PINS_DRIVER_TYPE_SPI_SDCARD}},
+
+    {"mcp_pins_pin_spi_clk", {m4_lit, (void *) MCP_PINS_PIN_SPI_CLK}},
+    {"mcp_pins_pin_spi_miso", {m4_lit, (void *) MCP_PINS_PIN_SPI_MISO}},
+    {"mcp_pins_pin_spi_mosi", {m4_lit, (void *) MCP_PINS_PIN_SPI_MOSI}},
+    {"mcp_pins_pin_spi_cs", {m4_lit, (void *) MCP_PINS_PIN_SPI_CS}},
 
 
     /*extensions*/
