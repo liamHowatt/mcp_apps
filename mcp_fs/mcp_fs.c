@@ -783,3 +783,12 @@ free_ret:
     if(sem != SEM_FAILED) assert(0 == sem_close(sem));
     return ret;
 }
+
+int mcp_fs_path_get_peer_id(const char * file_path)
+{
+    size_t len = strlen(file_path);
+    if(len < (sizeof(MNT_MCP) - 1)
+       || 0 != memcmp(file_path, MNT_MCP, sizeof(MNT_MCP) - 1)) return -1;
+    const char * vol_path = file_path + (sizeof(MNT_MCP) - 1);
+    return decode_path(&vol_path);
+}

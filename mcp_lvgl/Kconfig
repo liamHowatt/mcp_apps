@@ -6,7 +6,7 @@
 config MCP_APPS_MCP_LVGL
         tristate "MCP LVGL App"
         default n
-        depends on GRAPHICS_LVGL && MCP_APPS_MCP_FORTH
+        depends on GRAPHICS_LVGL && MCP_APPS_MCP_FORTH && MCP_APPS_MCP_FS
         ---help---
                 Enable the MCP LVGL App
 

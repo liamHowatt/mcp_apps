@@ -79,6 +79,7 @@ int mcp_forth_main(int argc, char *argv[])
     );
     free(memory);
     free(bin);
+    m4_vm_engine_global_cleanup();
     if(res == M4_RUNTIME_WORD_MISSING_ERROR) {
         fprintf(stderr, "m4_vm_engine_run: runtime word \"%s\" missing\n", missing_word);
         return 1;
