@@ -161,10 +161,6 @@ static void load_forth_driver(forth_driver_t * drv, const char * path)
         res = setenv("MCP_PEER", id_str, 1);
         assert(res == 0);
     }
-    else {
-        res = unsetenv("MCP_PEER");
-        assert(res == 0);
-    }
 
     char * cachepath = mcp_fs_cache_file(path);
     if(cachepath) {

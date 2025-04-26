@@ -94,6 +94,7 @@ typedef struct {
     int sfd;
     uint8_t pin_periph_owners[MCP_PINS_PERIPH_COUNT];
     uint8_t pin_driver_active[MCP_PINS_PERIPH_COUNT];
+    uint8_t pin_driver_minor_numbers[MCP_PINS_PERIPH_COUNT];
 } socket_sms_t;
 
 static unsigned periph_last_driver(unsigned periph) {
@@ -899,11 +900,13 @@ int mcpd_main(int argc, char *argv[])
                         struct mcp_pins_s arg = {
                             .peripheral = type.periph,
                             .driver = type.driver,
-                            .minor = mcp_pins[choice].minor_number
+                            .identifier = mcp_pins[choice].identifier,
+                            .user_devid_hint = pd->token,
                         };
                         res = boardctl(BIOC_MCP_PINS, (uintptr_t) &arg);
                         if(res == 0) {
                             resp = choice;
+                            s.pin_driver_minor_numbers[choice] = arg.minor_output;
                         } else {
                             perror("boardctl(BIOC_MCP_PINS)");
                         }
@@ -954,21 +957,6 @@ int mcpd_main(int argc, char *argv[])
                     }
                     int16_t from = (from_socketno << 2) | from_pinno;
                     int16_t to = (to_socketno << 2) | to_pinno;
-                    bool in_use = false;
-                    for(uint8_t i = 0; i < s.s1.peer_count; i++) {
-                        peer_data_t * pd2 = &s.s1.peer_datas[i];
-                        for(uint32_t j = 0; j < pd2->resource_count; j++) {
-                            in_use = true;
-                            if(my_dsc->is_input) { if(pd2->resources[j].from == from) break; }
-                            else { if(pd2->resources[j].to == to) break; }
-                            in_use = false;
-                        }
-                        if(in_use) break;
-                    }
-                    if(in_use) {
-                        resp = -MCPD_RESOURCE_UNAVAILABLE;
-                        break;
-                    }
 
                     uint8_t info_byte_gpio_dis = (from_pinno << 3) | (to_pinno << 1);
                     uint8_t info_byte_route = info_byte_gpio_dis | 1;
@@ -1002,7 +990,7 @@ int mcpd_main(int argc, char *argv[])
                     uint8_t driver_type = s.pin_driver_active[resource_id];
                     const char * driver_str = pins_str(periph_type, driver_type);
                     if(!driver_str) break;
-                    int minor_number = mcp_pins[resource_id].minor_number;
+                    int minor_number = s.pin_driver_minor_numbers[resource_id];
                     res = snprintf(path, sizeof(path), "/dev/%s%d", driver_str, minor_number);
                     assert(res > 0);
                     assert(res < sizeof(path));
