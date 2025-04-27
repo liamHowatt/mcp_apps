@@ -115,6 +115,8 @@ static void app_clicked_cb(lv_event_t * e)
     lv_obj_t * base_obj = lv_obj_create(lv_screen_active());
     lv_obj_remove_style_all(base_obj);
     lv_obj_set_size(base_obj, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(base_obj, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(base_obj, LV_OPA_COVER, 0);
     lv_obj_add_event_cb(base_obj, app_obj_delete_cb, LV_EVENT_DELETE, NULL);
     app_cb_t app_cb = lv_event_get_user_data(e);
     app_cb(base_obj);

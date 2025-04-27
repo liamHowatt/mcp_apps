@@ -1,0 +1,5 @@
+ifneq ($(CONFIG_MCP_APPS_PEANUT_GB),)
+CONFIGURED_APPS += $(APPDIR)/mcp_apps/peanut_gb
+CFLAGS += ${INCDIR_PREFIX}${APPDIR}/mcp_apps/peanut_gb/include
+CXXFLAGS += ${INCDIR_PREFIX}${APPDIR}/mcp_apps/peanut_gb/include
+endif

@@ -1,0 +1,14 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config MCP_APPS_PEANUT_GB
+        tristate "peanut_gb App"
+        default n
+        depends on GRAPHICS_LVGL
+        ---help---
+                Enable the peanut_gb App
+
+if MCP_APPS_PEANUT_GB
+endif

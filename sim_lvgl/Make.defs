@@ -1,0 +1,3 @@
+ifneq ($(CONFIG_MCP_APPS_SIM_LVGL),)
+CONFIGURED_APPS += $(APPDIR)/mcp_apps/sim_lvgl
+endif

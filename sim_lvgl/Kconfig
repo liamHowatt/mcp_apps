@@ -1,0 +1,30 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+menuconfig MCP_APPS_SIM_LVGL
+	tristate "sim_lvgl"
+	default n
+	depends on GRAPHICS_LVGL
+	---help---
+		Enable build the Light and Versatile Graphics Library Demo programs
+
+if MCP_APPS_SIM_LVGL
+
+config MCP_APPS_SIM_LVGL_PRIORITY
+	int "sim_lvgl task priority"
+	default 100
+
+config MCP_APPS_SIM_LVGL_STACKSIZE
+	int "sim_lvgl stack size"
+	default 16384
+
+config MCP_APPS_SIM_LVGL_INPUT_DEVPATH
+	string "Touchscreen device path"
+	default "/dev/input0"
+	depends on INPUT_TOUCHSCREEN
+	---help---
+		The path to the touchscreen device. Default: "/dev/input0"
+
+endif # MCP_APPS_SIM_LVGL
