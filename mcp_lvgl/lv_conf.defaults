@@ -1,0 +1,15 @@
+LV_COLOR_DEPTH                    16
+LV_BUILD_EXAMPLES                 0
+LV_FS_DEFAULT_DRIVER_LETTER       'A'
+LV_FS_POSIX_LETTER                'A'
+LV_FS_POSIX_PATH                  "/"
+LV_LOG_PRINTF                     1
+LV_USE_STDLIB_MALLOC              LV_STDLIB_CLIB
+LV_USE_STDLIB_STRING              LV_STDLIB_CLIB
+LV_USE_STDLIB_SPRINTF             LV_STDLIB_CLIB
+LV_USE_FILE_EXPLORER              1
+LV_FILE_EXPLORER_QUICK_ACCESS     0
+LV_USE_FS_POSIX                   1
+LV_USE_GRIDNAV                    1
+LV_USE_LOG                        1
+LV_USE_THEME_MONO                 1

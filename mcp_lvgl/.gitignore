@@ -1,2 +1,3 @@
 /lvgl.json
 /runtime_lvgl.c
+/lv_conf_json.h
