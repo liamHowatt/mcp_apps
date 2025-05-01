@@ -6,9 +6,11 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <fcntl.h>
+#include <errno.h>
 #include <string.h>
 #include <stdbool.h>
 #include <sys/stat.h>
+#include <nuttx/input/keyboard.h>
 
 #define ENABLE_SOUND 0
 #include "Peanut-GB/peanut_gb.h"
@@ -28,7 +30,12 @@ typedef struct {
     uint32_t first_tick;
     uint32_t frame_count;
     lv_obj_t * canv;
+    int keypad_fd;
     bool screenbuf_dirty;
+    uint8_t screen_joypad_mask;
+    uint8_t uinput_joypad_mask;
+    bool style_is_init;
+    lv_style_t btn_style;
     struct gb_s gb;
     uint8_t * rom_shards[SHARD_COUNT];
     uint8_t screenbuf[PALETTE_SIZE + (SCRW * SCRH)];
@@ -70,6 +77,56 @@ static void lcd_draw_line(struct gb_s *gb,
     memcpy(&ctx->screenbuf[PALETTE_SIZE + (SCRW * line)], pixels, SCRW);
 }
 
+static void update_uinput_joypad(ctx_t * ctx)
+{
+    ssize_t rwres;
+
+    if(ctx->keypad_fd < 0) {
+        return;
+    }
+
+    struct keyboard_event_s keypad_event;
+    while(sizeof(keypad_event) == (rwres = read(ctx->keypad_fd, &keypad_event, sizeof(keypad_event)))) {
+        uint8_t mask;
+        switch(keypad_event.code) {
+            case 103: /* KEY_UP */
+                mask = JOYPAD_UP;
+                break;
+            case 108: /* KEY_DOWN */
+                mask = JOYPAD_DOWN;
+                break;
+            case 105: /* KEY_LEFT */
+                mask = JOYPAD_LEFT;
+                break;
+            case 106: /* KEY_RIGHT */
+                mask = JOYPAD_RIGHT;
+                break;
+            case 1: /* KEY_ESC */
+                mask = JOYPAD_B;
+                break;
+            case 28: /* KEY_ENTER */
+                mask = JOYPAD_A;
+                break;
+            case 0x13b: /* BTN_START */
+                mask = JOYPAD_START;
+                break;
+            case 0x13a: /* BTN_SELECT */
+                mask = JOYPAD_SELECT;
+                break;
+            default:
+                continue;
+        }
+        if(keypad_event.type == KEYBOARD_PRESS) {
+            ctx->uinput_joypad_mask |= mask;
+        } else {
+            ctx->uinput_joypad_mask &= ~mask;
+        }
+    }
+    assert(rwres < 0 && (errno == EAGAIN || errno == EWOULDBLOCK));
+
+    ctx->gb.direct.joypad = ~(ctx->uinput_joypad_mask | ctx->screen_joypad_mask);
+}
+
 static void tim_cb(lv_timer_t * tim)
 {
     ctx_t * ctx = lv_timer_get_user_data(tim);
@@ -87,11 +144,119 @@ static void tim_cb(lv_timer_t * tim)
 
     ctx->screenbuf_dirty = false;
     for(uint32_t i = 0; i < frames_to_run; i++) {
+        update_uinput_joypad(ctx);
         gb_run_frame(&ctx->gb);
     }
     if(ctx->screenbuf_dirty) {
         lv_obj_invalidate(ctx->canv);
     }
+}
+
+static void btn_cb(lv_event_t * e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    if(code != LV_EVENT_PRESSED && code != LV_EVENT_RELEASED){
+        return;
+    }
+
+    ctx_t * ctx = lv_event_get_user_data(e);
+    lv_obj_t * btn = lv_event_get_target_obj(e);
+    uint8_t mask = (uintptr_t)lv_obj_get_user_data(btn);
+    if(code == LV_EVENT_PRESSED) {
+        ctx->screen_joypad_mask |= mask;
+    } else {
+        ctx->screen_joypad_mask &= ~mask;
+    }
+
+    ctx->gb.direct.joypad = ~(ctx->uinput_joypad_mask | ctx->screen_joypad_mask);
+}
+
+static lv_obj_t * create_pad(lv_obj_t * base_obj, lv_align_t align,
+                             const int32_t * col_dsc, const int32_t * row_dsc)
+{
+    lv_obj_t * pad = lv_obj_create(base_obj);
+    lv_obj_set_align(pad, align);
+    lv_obj_set_size(pad, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_style_radius(pad, LV_COORD_MAX, 0);
+    lv_obj_set_style_grid_column_dsc_array(pad, col_dsc, 0);
+    lv_obj_set_style_grid_row_dsc_array(pad, row_dsc, 0);
+    lv_obj_set_style_pad_gap(pad, 0, 0);
+    lv_obj_set_layout(pad, LV_LAYOUT_GRID);
+    return pad;
+}
+
+static void create_left_btn(ctx_t * ctx, lv_obj_t * left, const void * img_src,
+                            int32_t col_pos, int32_t row_pos, uint8_t joypad_mask)
+{
+    lv_obj_t * btn = lv_image_create(left);
+    lv_obj_set_grid_cell(btn, LV_GRID_ALIGN_STRETCH, col_pos, 1, LV_GRID_ALIGN_STRETCH, row_pos, 1);
+    lv_image_set_src(btn, img_src);
+    lv_image_set_inner_align(btn, LV_IMAGE_ALIGN_CENTER);
+    lv_obj_set_style_radius(btn, 0, 0);
+    lv_obj_add_style(btn, &ctx->btn_style, 0);
+
+    lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_user_data(btn, (void *)(uintptr_t) joypad_mask);
+    lv_obj_add_event_cb(btn, btn_cb, LV_EVENT_ALL, ctx);
+}
+
+static void create_right_btn(ctx_t * ctx, lv_obj_t * right,
+                             int32_t col_pos, int32_t row_pos, uint8_t joypad_mask)
+{
+    lv_obj_t * btn = lv_obj_create(right);
+    lv_obj_remove_style_all(btn);
+    lv_obj_set_grid_cell(btn, LV_GRID_ALIGN_STRETCH, col_pos, 1, LV_GRID_ALIGN_STRETCH, row_pos, 1);
+    lv_obj_set_style_radius(btn, LV_COORD_MAX, 0);
+    lv_obj_add_style(btn, &ctx->btn_style, 0);
+
+    lv_obj_set_user_data(btn, (void *)(uintptr_t) joypad_mask);
+    lv_obj_add_event_cb(btn, btn_cb, LV_EVENT_ALL, ctx);
+}
+
+static void create_mid_btn(ctx_t * ctx, lv_obj_t * mid, uint8_t joypad_mask)
+{
+    lv_obj_t * btn = lv_obj_create(mid);
+    lv_obj_remove_style_all(btn);
+    lv_obj_set_size(btn, 30, 15);
+    lv_obj_set_style_radius(btn, LV_COORD_MAX, 0);
+    lv_obj_add_style(btn, &ctx->btn_style, 0);
+
+    lv_obj_set_user_data(btn, (void *)(uintptr_t) joypad_mask);
+    lv_obj_add_event_cb(btn, btn_cb, LV_EVENT_ALL, ctx);
+}
+
+static void create_sceen_joypad(lv_obj_t * base_obj)
+{
+    ctx_t * ctx = lv_obj_get_user_data(base_obj);
+
+    static const int32_t left_col_dsc[] = {30, 30, 30, LV_GRID_TEMPLATE_LAST};
+    static const int32_t left_row_dsc[] = {30, 30, 30, LV_GRID_TEMPLATE_LAST};
+    lv_obj_t * left = create_pad(base_obj, LV_ALIGN_BOTTOM_LEFT, left_col_dsc, left_row_dsc);
+    create_left_btn(ctx, left, LV_SYMBOL_UP, 1, 0, JOYPAD_UP);
+    create_left_btn(ctx, left, LV_SYMBOL_DOWN, 1, 2, JOYPAD_DOWN);
+    create_left_btn(ctx, left, LV_SYMBOL_LEFT, 0, 1, JOYPAD_LEFT);
+    create_left_btn(ctx, left, LV_SYMBOL_RIGHT, 2, 1, JOYPAD_RIGHT);
+
+    static const int32_t right_col_dsc[] = {45, 45, LV_GRID_TEMPLATE_LAST};
+    static const int32_t right_row_dsc[] = {45, 45, LV_GRID_TEMPLATE_LAST};
+    lv_obj_t * right = create_pad(base_obj, LV_ALIGN_BOTTOM_RIGHT, right_col_dsc, right_row_dsc);
+    create_right_btn(ctx, right, 1, 0, JOYPAD_A);
+    create_right_btn(ctx, right, 0, 1, JOYPAD_B);
+
+    lv_obj_t * mid = lv_obj_create(base_obj);
+    lv_obj_align(mid, LV_ALIGN_BOTTOM_MID, 0, -60);
+    lv_obj_set_size(mid, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_style_radius(mid, LV_COORD_MAX, 0);
+    lv_obj_set_flex_flow(mid, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(mid, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_all(mid, 5, 0);
+
+    create_mid_btn(ctx, mid, JOYPAD_SELECT);
+    create_mid_btn(ctx, mid, JOYPAD_START);
+
+    lv_obj_t * menu_btn = lv_image_create(base_obj);
+    lv_obj_align(menu_btn, LV_ALIGN_BOTTOM_MID, 0, -30);
+    lv_image_set_src(menu_btn, LV_SYMBOL_LIST);
 }
 
 static void game_file_chosen_cb(lv_event_t * e)
@@ -109,6 +274,7 @@ static void game_file_chosen_cb(lv_event_t * e)
                    lv_file_explorer_get_current_path(fe),
                    lv_file_explorer_get_selected_file_name(fe));
     assert(res >= 0);
+    free(ctx->save_path);
     res = asprintf(&ctx->save_path, "%s.sav", rom_path);
     assert(res >= 0);
     int fd = open(rom_path, O_RDONLY);
@@ -120,12 +286,7 @@ static void game_file_chosen_cb(lv_event_t * e)
     }
 
     res = fstat(fd, &statbuf);
-    if(res < 0) {
-        fprintf(stderr, "could not stat ROM\n");
-        res = close(fd);
-        assert(res == 0);
-        return;
-    }
+    assert(res == 0);
     uint32_t rom_size = statbuf.st_size;
     if(rom_size > MAX_ROM_SIZE) {
         fprintf(stderr, "ROM too big\n");
@@ -148,6 +309,12 @@ static void game_file_chosen_cb(lv_event_t * e)
     res = close(fd);
     assert(res == 0);
 
+    lv_style_init(&ctx->btn_style);
+    lv_style_set_border_opa(&ctx->btn_style, LV_OPA_COVER);
+    lv_style_set_border_width(&ctx->btn_style, 2);
+    lv_style_set_border_color(&ctx->btn_style, lv_color_black());
+    ctx->style_is_init = true;
+
     lv_obj_clean(base_obj);
     lv_obj_set_style_layout(base_obj, LV_LAYOUT_NONE, 0);
 
@@ -168,7 +335,7 @@ static void game_file_chosen_cb(lv_event_t * e)
         fd = open(ctx->save_path, O_RDONLY);
         if(fd < 0) {
             assert(errno == ENOENT);
-            memset(ctx->cart_ram, 0, cart_ram_size);
+            memset(ctx->cart_ram, 0xff, cart_ram_size);
         }
         else {
             res = fstat(fd, &statbuf);
@@ -190,9 +357,21 @@ static void game_file_chosen_cb(lv_event_t * e)
         }
     }
 
+    ctx->keypad_fd = open("/dev/ukeyboard", O_RDONLY | O_NONBLOCK);
+    assert(ctx->keypad_fd >= 0 || errno == ENOENT);
+
+    lv_indev_t * indev = NULL;
+    while((indev = lv_indev_get_next(indev))) {
+        if(lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER) {
+            create_sceen_joypad(base_obj);
+            break;
+        }
+    }
+
     ctx->first_tick = lv_tick_get();
     ctx->frame_count = 1;
     ctx->canv = canv;
+    update_uinput_joypad(ctx);
     gb_run_frame(&ctx->gb);
     ctx->timer = lv_timer_create(tim_cb, 1000.0 / VERTICAL_SYNC + 1.0, ctx);
 }
@@ -207,6 +386,8 @@ static void base_obj_delete_cb(lv_event_t * e)
     free(ctx->cart_ram);
     free(ctx->save_path);
     if(ctx->timer) lv_timer_delete(ctx->timer);
+    if(ctx->keypad_fd >= 0) assert(0 == close(ctx->keypad_fd));
+    if(ctx->style_is_init) lv_style_reset(&ctx->btn_style);
     free(ctx);
 }
 
@@ -214,6 +395,7 @@ void peanut_gb_app_run(lv_obj_t * base_obj)
 {
     ctx_t * ctx = calloc(1, sizeof(*ctx));
     assert(ctx);
+    ctx->keypad_fd = -1;
     lv_obj_set_user_data(base_obj, ctx);
     lv_obj_add_event_cb(base_obj, base_obj_delete_cb, LV_EVENT_DELETE, NULL);
 

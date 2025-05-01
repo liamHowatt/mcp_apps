@@ -13,6 +13,9 @@
 #include <mcp/mcp_lvgl.h>
 #include <mcp/mcp_forth.h>
 #include <mcp/mcp_fs.h>
+#ifdef CONFIG_MCP_APPS_PEANUT_GB
+#include <mcp/peanut_gb.h>
+#endif
 
 #include <lvgl/lvgl.h>
 #include <lvgl/src/core/lv_global.h>
@@ -79,6 +82,7 @@ void mcp_lvgl_queue_close(mcp_lvgl_queue_t mqd)
     assert(res == 0);
 }
 
+static void app_clicked_cb(lv_event_t * e);
 static void add_entry_to_app_list_obj(lv_obj_t * list, const app_entry_t * entry);
 
 static void create_app_list(void)
@@ -91,12 +95,13 @@ static void create_app_list(void)
     lv_obj_set_size(list, LV_PCT(100), LV_PCT(100));
     lv_obj_set_style_radius(list, 0, 0);
     lv_obj_set_style_border_width(list, 0, 0);
-    for(int i = 1; i <= 3; i++) {
-        char buf[3];
-        sprintf(buf, "%d", i);
-        lv_obj_t * btn = lv_list_add_button(list, NULL, buf);
-        lv_group_remove_obj(btn);
-    }
+    lv_obj_t * btn;
+    (void)btn;
+#ifdef CONFIG_MCP_APPS_PEANUT_GB
+    btn = lv_list_add_button(list, NULL, "Peanut GB");
+    lv_group_remove_obj(btn);
+    lv_obj_add_event_cb(btn, app_clicked_cb, LV_EVENT_CLICKED, peanut_gb_app_run);
+#endif
     for(int i = 0; i < ud->app_count; i++) {
         add_entry_to_app_list_obj(list, &ud->app_entries[i]);
     }
