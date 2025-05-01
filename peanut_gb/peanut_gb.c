@@ -225,6 +225,52 @@ static void create_mid_btn(ctx_t * ctx, lv_obj_t * mid, uint8_t joypad_mask)
     lv_obj_add_event_cb(btn, btn_cb, LV_EVENT_ALL, ctx);
 }
 
+static void close_menu_cb(lv_event_t * e)
+{
+    lv_obj_delete(lv_obj_get_parent(lv_event_get_target_obj(e)));
+}
+
+static void save_cb(lv_event_t * e)
+{
+    int res;
+    ssize_t rwres;
+
+    ctx_t * ctx = lv_event_get_user_data(e);
+
+    int fd = open(ctx->save_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    assert(fd >= 0);
+
+    uint32_t cart_ram_size = gb_get_save_size(&ctx->gb);
+    rwres = write(fd, ctx->cart_ram, cart_ram_size);
+    assert(rwres == cart_ram_size);
+
+    res = close(fd);
+    assert(res == 0);
+}
+
+static void menu_btn_clicked_cb(lv_event_t * e)
+{
+    lv_obj_t * menu_btn = lv_event_get_target_obj(e);
+    lv_obj_t * base_obj = lv_obj_get_parent(menu_btn);
+    lv_obj_t * base_obj_youngest_child = lv_obj_get_child(base_obj, -1);
+    assert(base_obj_youngest_child);
+    if(lv_obj_get_class(base_obj_youngest_child) == &lv_list_class) {
+        return;
+    }
+    ctx_t * ctx = lv_event_get_user_data(e);
+
+    lv_obj_t * menu = lv_list_create(base_obj);
+    lv_obj_center(menu);
+
+    lv_obj_t * btn;
+
+    btn = lv_list_add_button(menu, LV_SYMBOL_PLAY, "Resume");
+    lv_obj_add_event_cb(btn, close_menu_cb, LV_EVENT_CLICKED, NULL);
+
+    btn = lv_list_add_button(menu, LV_SYMBOL_SAVE, "Save");
+    lv_obj_add_event_cb(btn, save_cb, LV_EVENT_CLICKED, ctx);
+}
+
 static void create_sceen_joypad(lv_obj_t * base_obj)
 {
     ctx_t * ctx = lv_obj_get_user_data(base_obj);
@@ -257,6 +303,8 @@ static void create_sceen_joypad(lv_obj_t * base_obj)
     lv_obj_t * menu_btn = lv_image_create(base_obj);
     lv_obj_align(menu_btn, LV_ALIGN_BOTTOM_MID, 0, -30);
     lv_image_set_src(menu_btn, LV_SYMBOL_LIST);
+    lv_obj_add_flag(menu_btn, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(menu_btn, menu_btn_clicked_cb, LV_EVENT_CLICKED, ctx);
 }
 
 static void game_file_chosen_cb(lv_event_t * e)
