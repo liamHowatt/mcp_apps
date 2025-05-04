@@ -19,11 +19,11 @@
 
 #define MAX_ROM_SIZE (1024 * 1024)
 #define SHARD_SIZE (MAX_ROM_SIZE / SHARD_COUNT)
-#define PALETTE_SIZE (4 * 256)
 #define SCRW 160
 #define SCRH 144
 
 typedef struct {
+    lv_obj_t * base_obj;
     char * save_path;
     lv_timer_t * timer;
     uint8_t * cart_ram;
@@ -31,6 +31,7 @@ typedef struct {
     uint32_t frame_count;
     lv_obj_t * canv;
     int keypad_fd;
+    uint8_t size_val;
     bool screenbuf_dirty;
     uint8_t screen_joypad_mask;
     uint8_t uinput_joypad_mask;
@@ -38,8 +39,13 @@ typedef struct {
     lv_style_t btn_style;
     struct gb_s gb;
     uint8_t * rom_shards[SHARD_COUNT];
-    uint8_t screenbuf[PALETTE_SIZE + (SCRW * SCRH)];
+    bool dirty_rows[SCRH];
+    uint16_t palette[0x23 + 1];
+    uint8_t raw_buf[SCRH][SCRW];
+    uint16_t canv_buf[SCRH][SCRW];
 } ctx_t;
+
+static void open_menu(ctx_t * ctx);
 
 static uint8_t gb_rom_read(struct gb_s * gb, const uint_fast32_t addr)
 {
@@ -74,7 +80,15 @@ static void lcd_draw_line(struct gb_s *gb,
 {
     ctx_t * ctx = gb->direct.priv;
     ctx->screenbuf_dirty = true;
-    memcpy(&ctx->screenbuf[PALETTE_SIZE + (SCRW * line)], pixels, SCRW);
+    ctx->dirty_rows[line] = true;
+    memcpy(ctx->raw_buf[line], pixels, SCRW);
+}
+
+static bool get_menu_is_open(lv_obj_t * base_obj)
+{
+    lv_obj_t * base_obj_youngest_child = lv_obj_get_child(base_obj, -1);
+    assert(base_obj_youngest_child);
+    return lv_obj_get_class(base_obj_youngest_child) == &lv_list_class;
 }
 
 static void update_uinput_joypad(ctx_t * ctx)
@@ -85,8 +99,19 @@ static void update_uinput_joypad(ctx_t * ctx)
         return;
     }
 
+    bool menu_is_open_init = false;
+    bool menu_is_open;
+
     struct keyboard_event_s keypad_event;
     while(sizeof(keypad_event) == (rwres = read(ctx->keypad_fd, &keypad_event, sizeof(keypad_event)))) {
+        if(!menu_is_open_init) {
+            menu_is_open_init = true;
+            menu_is_open = get_menu_is_open(ctx->base_obj);
+        }
+        if(menu_is_open) {
+            continue;
+        }
+
         uint8_t mask;
         switch(keypad_event.code) {
             case 103: /* KEY_UP */
@@ -114,6 +139,8 @@ static void update_uinput_joypad(ctx_t * ctx)
                 mask = JOYPAD_SELECT;
                 break;
             default:
+                open_menu(ctx);
+                menu_is_open = true;
                 continue;
         }
         if(keypad_event.type == KEYBOARD_PRESS) {
@@ -148,6 +175,14 @@ static void tim_cb(lv_timer_t * tim)
         gb_run_frame(&ctx->gb);
     }
     if(ctx->screenbuf_dirty) {
+        for(uint32_t i = 0; i < SCRH; i++) {
+            if(ctx->dirty_rows[i]) {
+                ctx->dirty_rows[i] = false;
+                for(uint32_t j = 0; j < SCRW; j++) {
+                    ctx->canv_buf[i][j] = ctx->palette[ctx->raw_buf[i][j]];
+                }
+            }
+        }
         lv_obj_invalidate(ctx->canv);
     }
 }
@@ -248,27 +283,67 @@ static void save_cb(lv_event_t * e)
     assert(res == 0);
 }
 
-static void menu_btn_clicked_cb(lv_event_t * e)
+static void resize_cb(lv_event_t * e)
 {
-    lv_obj_t * menu_btn = lv_event_get_target_obj(e);
-    lv_obj_t * base_obj = lv_obj_get_parent(menu_btn);
-    lv_obj_t * base_obj_youngest_child = lv_obj_get_child(base_obj, -1);
-    assert(base_obj_youngest_child);
-    if(lv_obj_get_class(base_obj_youngest_child) == &lv_list_class) {
-        return;
-    }
     ctx_t * ctx = lv_event_get_user_data(e);
 
+    lv_obj_t * canv = lv_obj_get_child(ctx->base_obj, 0);
+
+    ++ctx->size_val;
+    while(1) {
+        switch(ctx->size_val) {
+            case 0:
+                lv_image_set_inner_align(canv, LV_IMAGE_ALIGN_TOP_MID);
+                lv_image_set_scale(canv, LV_SCALE_NONE);
+                lv_image_set_offset_y(canv, 0);
+                break;
+            case 1:
+                lv_image_set_inner_align(canv, LV_IMAGE_ALIGN_STRETCH);
+                break;
+            case 2:
+                lv_image_set_inner_align(canv, LV_IMAGE_ALIGN_CONTAIN);
+                lv_image_set_offset_y(canv, -((lv_obj_get_height(canv) - lv_image_get_transformed_height(canv)) / 2));
+                break;
+            default:
+                ctx->size_val = 0;
+                continue;
+        }
+
+        break;
+    }
+}
+
+static void open_menu(ctx_t * ctx)
+{
+    lv_obj_t * base_obj = ctx->base_obj;
+    if(get_menu_is_open(base_obj)) {
+        return;
+    }
+
     lv_obj_t * menu = lv_list_create(base_obj);
+    lv_gridnav_add(menu, LV_GRIDNAV_CTRL_NONE);
+    lv_group_add_obj(lv_group_get_default(), menu);
     lv_obj_center(menu);
 
     lv_obj_t * btn;
 
     btn = lv_list_add_button(menu, LV_SYMBOL_PLAY, "Resume");
+    lv_group_remove_obj(btn);
     lv_obj_add_event_cb(btn, close_menu_cb, LV_EVENT_CLICKED, NULL);
 
     btn = lv_list_add_button(menu, LV_SYMBOL_SAVE, "Save");
+    lv_group_remove_obj(btn);
     lv_obj_add_event_cb(btn, save_cb, LV_EVENT_CLICKED, ctx);
+
+    btn = lv_list_add_button(menu, LV_SYMBOL_IMAGE, "Resize");
+    lv_group_remove_obj(btn);
+    lv_obj_add_event_cb(btn, resize_cb, LV_EVENT_CLICKED, ctx);
+}
+
+static void menu_btn_clicked_cb(lv_event_t * e)
+{
+    ctx_t * ctx = lv_event_get_user_data(e);
+    open_menu(ctx);
 }
 
 static void create_sceen_joypad(lv_obj_t * base_obj)
@@ -395,13 +470,14 @@ static void game_file_chosen_cb(lv_event_t * e)
     }
 
     lv_obj_t * canv = lv_canvas_create(base_obj);
-    lv_obj_set_align(canv, LV_ALIGN_TOP_MID);
-    lv_canvas_set_buffer(canv, ctx->screenbuf, SCRW, SCRH, LV_COLOR_FORMAT_I8);
+    lv_image_set_inner_align(canv, LV_IMAGE_ALIGN_TOP_MID);
+    lv_obj_set_size(canv, LV_PCT(100), LV_PCT(100));
+    lv_canvas_set_buffer(canv, ctx->canv_buf, SCRW, SCRH, LV_COLOR_FORMAT_RGB565);
     for(uint32_t shade_i = 0; shade_i < 4; shade_i++) {
         uint8_t gray_value = (3 - shade_i) * 255 / 3;
-        lv_color32_t color_value = {.red=gray_value, .green=gray_value, .blue=gray_value, .alpha=255};
+        lv_color_t color_value = {.red=gray_value, .green=gray_value, .blue=gray_value};
         for(uint32_t layer_i = 0; layer_i < 3; layer_i++) {
-            lv_canvas_set_palette(canv, (layer_i << 4) | shade_i, color_value);
+            ctx->palette[(layer_i << 4) | shade_i] = lv_color_to_u16(color_value);
         }
     }
 
@@ -443,6 +519,7 @@ void peanut_gb_app_run(lv_obj_t * base_obj)
 {
     ctx_t * ctx = calloc(1, sizeof(*ctx));
     assert(ctx);
+    ctx->base_obj = base_obj;
     ctx->keypad_fd = -1;
     lv_obj_set_user_data(base_obj, ctx);
     lv_obj_add_event_cb(base_obj, base_obj_delete_cb, LV_EVENT_DELETE, NULL);

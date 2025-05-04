@@ -7,11 +7,17 @@
 #include <sys/boardctl.h>
 #include <sys/mount.h>
 #include <assert.h>
+#include <fcntl.h>
+#include <errno.h>
 
 #include <lvgl/lvgl.h>
 #include <lvgl/demos/lv_demos.h>
 #ifdef CONFIG_LV_USE_NUTTX_LIBUV
 #include <uv.h>
+#endif
+
+#ifdef CONFIG_SIM_KEYBOARD
+#include <nuttx/input/keyboard.h>
 #endif
 
 #ifdef CONFIG_MCP_APPS_PEANUT_GB
@@ -43,6 +49,20 @@
  * Private Type Declarations
  ****************************************************************************/
 
+#ifdef CONFIG_SIM_KEYBOARD
+struct kbd_lv_key_s {
+  uint32_t key;
+  lv_indev_state_t state;
+};
+
+struct kbd_s {
+  int fd;
+  struct kbd_lv_key_s last_key_event;
+  bool has_last_key_event;
+  lv_indev_state_t last_state;
+};
+#endif
+
 /****************************************************************************
  * Private Data
  ****************************************************************************/
@@ -72,6 +92,78 @@ static void lv_nuttx_uv_loop(uv_loop_t *loop, lv_nuttx_result_t *result)
   lv_nuttx_uv_deinit(&data);
 }
 #endif
+
+#ifdef CONFIG_SIM_KEYBOARD
+static bool kbd_try_read_key(int fd, struct kbd_lv_key_s * key_event_lv)
+{
+  ssize_t rwres;
+
+  struct keyboard_event_s key_event;
+  while((rwres = read(fd, &key_event, sizeof(key_event))) == sizeof(key_event)) {
+    switch(key_event.code) {
+      case XK_Up:       key_event_lv->key = LV_KEY_UP;        break;
+      case XK_Down:     key_event_lv->key = LV_KEY_DOWN;      break;
+      case XK_Left:     key_event_lv->key = LV_KEY_LEFT;      break;
+      case XK_Right:    key_event_lv->key = LV_KEY_RIGHT;     break;
+      case XK_Return:   key_event_lv->key = LV_KEY_ENTER;     break;
+      case XK_Escape:   key_event_lv->key = LV_KEY_ESC;       break;
+      default:
+        continue;
+    }
+
+    key_event_lv->state = key_event.type == KEYBOARD_PRESS
+                          ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+
+    return true;
+  }
+  assert(rwres < 0 && (errno == EAGAIN || errno == EWOULDBLOCK));
+
+  return false;
+}
+
+static void kbd_read(lv_indev_t * indev, lv_indev_data_t * data)
+{
+  struct kbd_s * kbd = lv_indev_get_driver_data(indev);
+
+  if(kbd->has_last_key_event || kbd_try_read_key(kbd->fd, &kbd->last_key_event)) {
+    data->key = kbd->last_key_event.key;
+    kbd->last_state = kbd->last_key_event.state;
+
+    bool another_key_was_read = kbd_try_read_key(kbd->fd, &kbd->last_key_event);
+    kbd->has_last_key_event = another_key_was_read;
+    data->continue_reading  = another_key_was_read;
+  }
+
+  data->state = kbd->last_state;
+}
+
+static lv_indev_t * kbd_create(struct kbd_s * kbd)
+{
+  lv_indev_t * indev = lv_indev_create();
+  lv_indev_set_type(indev, LV_INDEV_TYPE_KEYPAD);
+  lv_indev_set_read_cb(indev, kbd_read);
+  lv_indev_set_driver_data(indev, kbd);
+
+  kbd->fd = open("/dev/kbd", O_RDONLY | O_NONBLOCK);
+  assert(kbd->fd >= 0);
+
+  kbd->has_last_key_event = false;
+  kbd->last_state = LV_INDEV_STATE_RELEASED;
+
+  return indev;
+}
+#endif
+
+static void make_enc_kpd_group(void)
+{
+    lv_group_t * g = lv_group_create();
+    lv_group_set_default(g);
+
+    lv_indev_t * indev = NULL;
+    while((indev = lv_indev_get_next(indev))) {
+        lv_indev_set_group(indev, g);
+    }
+}
 
 static void app_clicked_cb(lv_event_t * e)
 {
@@ -146,10 +238,19 @@ int main(int argc, FAR char *argv[])
       return 1;
     }
 
+#ifdef CONFIG_SIM_KEYBOARD
+  struct kbd_s kbd;
+  kbd_create(&kbd);
+#endif
+
   res = mount("", "/mnt/host", "hostfs", 0, "fs=/root/nuttx_hostfs/");
   assert(res == 0);
 
+  make_enc_kpd_group();
+
   lv_obj_t * list = lv_list_create(lv_screen_active());
+  lv_gridnav_add(list, LV_GRIDNAV_CTRL_NONE);
+  lv_group_add_obj(lv_group_get_default(), list);
   lv_obj_set_size(list, LV_PCT(100), LV_PCT(100));
   lv_obj_set_style_radius(list, 0, 0);
   lv_obj_set_style_border_width(list, 0, 0);
@@ -158,12 +259,16 @@ int main(int argc, FAR char *argv[])
   (void)btn;
 #ifdef CONFIG_MCP_APPS_PEANUT_GB
   btn = lv_list_add_button(list, NULL, "Peanut GB");
+  lv_group_remove_obj(btn);
   lv_obj_add_event_cb(btn, app_clicked_cb, LV_EVENT_CLICKED, peanut_gb_app_run);
 #endif
 
 #ifdef CONFIG_LV_USE_NUTTX_LIBUV
   lv_nuttx_uv_loop(&ui_loop, &result);
 #else
+
+  LV_LOG_USER("TEST LOG");
+
   while (1)
     {
       uint32_t idle;
