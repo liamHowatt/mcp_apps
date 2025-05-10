@@ -21,6 +21,7 @@
 #define SHARD_SIZE (MAX_ROM_SIZE / SHARD_COUNT)
 #define SCRW 160
 #define SCRH 144
+#define GB_TIMER_PERIOD (1000.0 / VERTICAL_SYNC + 1.0)
 
 typedef struct {
     lv_obj_t * base_obj;
@@ -167,6 +168,10 @@ static void tim_cb(lv_timer_t * tim)
     uint32_t frames_to_run = frames_should_have_run > ctx->frame_count
                              ? frames_should_have_run - ctx->frame_count
                              : 0;
+    if(frames_to_run > 10) {
+        frames_to_run = 10;
+        lv_timer_ready(tim);
+    }
     ctx->frame_count += frames_to_run;
 
     ctx->screenbuf_dirty = false;
@@ -450,6 +455,9 @@ static void game_file_chosen_cb(lv_event_t * e)
     assert(err == 0);
     gb_init_lcd(&ctx->gb, lcd_draw_line);
 
+    // ctx->gb.direct.interlace = true;
+    ctx->gb.direct.frame_skip = true;
+
     uint32_t cart_ram_size = gb_get_save_size(&ctx->gb);
     if(cart_ram_size) {
         ctx->cart_ram = malloc(cart_ram_size);
@@ -497,7 +505,7 @@ static void game_file_chosen_cb(lv_event_t * e)
     ctx->canv = canv;
     update_uinput_joypad(ctx);
     gb_run_frame(&ctx->gb);
-    ctx->timer = lv_timer_create(tim_cb, 1000.0 / VERTICAL_SYNC + 1.0, ctx);
+    ctx->timer = lv_timer_create(tim_cb, GB_TIMER_PERIOD, ctx);
 }
 
 static void base_obj_delete_cb(lv_event_t * e)
