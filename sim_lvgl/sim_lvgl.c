@@ -23,6 +23,12 @@
 #ifdef CONFIG_MCP_APPS_PEANUT_GB
 #include <mcp/peanut_gb.h>
 #endif
+#ifdef CONFIG_MCP_APPS_BEEPER
+#include <mcp/beeper.h>
+#endif
+#ifdef CONFIG_MCP_APPS_TEXTER_UI_DEMO
+#include <mcp/texter_ui.h>
+#endif
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -261,6 +267,16 @@ int main(int argc, FAR char *argv[])
   btn = lv_list_add_button(list, NULL, "Peanut GB");
   lv_group_remove_obj(btn);
   lv_obj_add_event_cb(btn, app_clicked_cb, LV_EVENT_CLICKED, peanut_gb_app_run);
+#endif
+#ifdef CONFIG_MCP_APPS_BEEPER
+  btn = lv_list_add_button(list, NULL, "Beeper");
+  lv_group_remove_obj(btn);
+  lv_obj_add_event_cb(btn, app_clicked_cb, LV_EVENT_CLICKED, beeper_app_run);
+#endif
+#ifdef CONFIG_MCP_APPS_TEXTER_UI_DEMO
+  btn = lv_list_add_button(list, NULL, "Texter UI Demo");
+  lv_group_remove_obj(btn);
+  lv_obj_add_event_cb(btn, app_clicked_cb, LV_EVENT_CLICKED, texter_ui_demo_app_run);
 #endif
 
 #ifdef CONFIG_LV_USE_NUTTX_LIBUV

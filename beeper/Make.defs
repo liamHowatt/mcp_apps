@@ -1,0 +1,5 @@
+ifneq ($(CONFIG_MCP_APPS_BEEPER),)
+CONFIGURED_APPS += $(APPDIR)/mcp_apps/beeper
+CFLAGS += ${INCDIR_PREFIX}${APPDIR}/mcp_apps/beeper/include
+CXXFLAGS += ${INCDIR_PREFIX}${APPDIR}/mcp_apps/beeper/include
+endif

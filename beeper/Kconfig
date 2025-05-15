@@ -1,0 +1,14 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config MCP_APPS_BEEPER
+        tristate "Beeper App"
+        default n
+        depends on GRAPHICS_LVGL && HAVE_CXX && UCLIBCXX && CRYPTO_WOLFSSL && MCP_APPS_TEXTER_UI
+        ---help---
+                Enable the Beeper App
+
+if MCP_APPS_BEEPER
+endif

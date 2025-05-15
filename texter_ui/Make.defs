@@ -1,0 +1,5 @@
+ifneq ($(CONFIG_MCP_APPS_TEXTER_UI),)
+CONFIGURED_APPS += $(APPDIR)/mcp_apps/texter_ui
+CFLAGS += ${INCDIR_PREFIX}${APPDIR}/mcp_apps/texter_ui/include
+CXXFLAGS += ${INCDIR_PREFIX}${APPDIR}/mcp_apps/texter_ui/include
+endif

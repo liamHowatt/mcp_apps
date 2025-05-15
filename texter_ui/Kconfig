@@ -1,0 +1,21 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config MCP_APPS_TEXTER_UI
+        tristate "Texter UI Component"
+        default n
+        depends on GRAPHICS_LVGL
+        ---help---
+                Enable the Texter UI Component
+
+if MCP_APPS_TEXTER_UI
+
+config MCP_APPS_TEXTER_UI_DEMO
+        tristate "Texter UI Demo App"
+        default n
+        ---help---
+                Enable the Texter UI Demo App
+
+endif
