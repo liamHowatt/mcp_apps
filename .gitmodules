@@ -7,3 +7,9 @@
 [submodule "peanut_gb/Peanut-GB"]
 	path = peanut_gb/Peanut-GB
 	url = https://github.com/deltabeard/Peanut-GB.git
+[submodule "beeper/olm"]
+	path = beeper/olm
+	url = https://github.com/liamHowatt/olm.git
+[submodule "beeper/pdjson"]
+	path = beeper/pdjson
+	url = https://github.com/skeeto/pdjson.git
