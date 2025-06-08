@@ -6,7 +6,7 @@
 config MCP_APPS_BEEPER
         tristate "Beeper App"
         default n
-        depends on GRAPHICS_LVGL && HAVE_CXX && UCLIBCXX && CRYPTO_WOLFSSL && MCP_APPS_TEXTER_UI
+        depends on GRAPHICS_LVGL && HAVE_CXX && UCLIBCXX && CRYPTO_WOLFSSL && MCP_APPS_TEXTER_UI && EVENT_FD
         ---help---
                 Enable the Beeper App
 

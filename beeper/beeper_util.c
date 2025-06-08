@@ -1,5 +1,7 @@
 #include "beeper_private.h"
 
+#include <sys/eventfd.h>
+
 char * beeper_read_text_file(const char * path)
 {
     int fd = open(path, O_RDONLY);
@@ -23,46 +25,104 @@ char * beeper_read_text_file(const char * path)
     return buf;
 }
 
+void beeper_array_init(beeper_array_t * ba, size_t item_size)
+{
+    ba->item_size = item_size;
+    ba->len = 0;
+    ba->cap = 0;
+    ba->data = NULL;
+}
+
+void beeper_array_destroy(beeper_array_t * ba)
+{
+    free(ba->data);
+}
+
+size_t beeper_array_len(beeper_array_t * ba)
+{
+    return ba->len;
+}
+
+void * beeper_array_data(beeper_array_t * ba)
+{
+    return ba->data;
+}
+
+void beeper_array_append(beeper_array_t * ba, const void * to_append)
+{
+    if(ba->len == ba->cap) {
+        if(ba->cap == 0) ba->cap = 2;
+        else ba->cap *= 2;
+        ba->data = realloc(ba->data, ba->cap * ba->item_size);
+        assert(ba->data);
+    }
+    memcpy(ba->data + ba->len * ba->item_size, to_append, ba->item_size);
+    ba->len += 1;
+}
+
+void beeper_array_remove(beeper_array_t * ba, size_t index)
+{
+    assert(index < ba->len);
+    ba->len -= 1;
+    if(index != ba->len) {
+        size_t offset = index * ba->item_size;
+        memmove(ba->data + offset, ba->data + (offset + ba->item_size), (ba->len - index) * ba->item_size);
+    }
+}
+
+void beeper_array_reset(beeper_array_t * ba)
+{
+    ba->len = 0;
+    ba->cap = 0;
+    free(ba->data);
+    ba->data = NULL;
+}
+
 void beeper_queue_init(beeper_queue_t * bq, size_t item_size)
 {
-    bq->item_size = item_size;
-    bq->len = 0;
-    bq->cap = 0;
-    bq->data = NULL;
+    beeper_array_init(&bq->a, item_size);
+    bq->evfd = eventfd(0, EFD_CLOEXEC);
+    assert(bq->evfd >= 0);
 }
 
 void beeper_queue_destroy(beeper_queue_t * bq)
 {
-    free(bq->data);
+    beeper_array_destroy(&bq->a);
+    int res = close(bq->evfd);
+    assert(res == 0);
 }
 
 void beeper_queue_push(beeper_queue_t * bq, const void * to_push)
 {
-    if(bq->len == bq->cap) {
-        if(bq->cap == 0) bq->cap = 2;
-        else bq->cap *= 2;
-        bq->data = realloc(bq->data, bq->cap * bq->item_size);
-        assert(bq->data);
+    if(beeper_array_len(&bq->a) == 0) {
+        uint64_t notify = 1;
+        ssize_t rwres = write(bq->evfd, &notify, 8);
+        assert(rwres == 8);
     }
-    memcpy(bq->data + bq->len * bq->item_size, to_push, bq->item_size);
-    bq->len += 1;
+    beeper_array_append(&bq->a, to_push);
 }
 
 bool beeper_queue_pop(beeper_queue_t * bq, void * pop_dst)
 {
-    if(bq->len == 0) return false;
-    bq->len -= 1;
-    memcpy(pop_dst, bq->data, bq->item_size);
-    memmove(bq->data, bq->data + bq->item_size, bq->len * bq->item_size);
-    if(bq->len == 0) {
-        free(bq->data);
-        bq->data = NULL;
-        bq->cap = 0;
+    size_t array_len = beeper_array_len(&bq->a);
+    if(array_len == 0) return false;
+    void * array_data = beeper_array_data(&bq->a);
+    memcpy(pop_dst, array_data, bq->a.item_size);
+    if(array_len == 1) {
+        beeper_array_reset(&bq->a);
+
+        uint64_t notify;
+        ssize_t rwres = read(bq->evfd, &notify, 8);
+        assert(rwres == 8);
+        assert(notify == 1);
+    }
+    else {
+        beeper_array_remove(&bq->a, 0);
     }
     return true;
 }
 
-bool beeper_queue_is_empty(beeper_queue_t * bq)
+int beeper_queue_get_poll_fd(const beeper_queue_t * bq)
 {
-    return bq->len == 0;
+    return bq->evfd;
 }

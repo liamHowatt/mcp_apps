@@ -20,6 +20,8 @@
 #include <nuttx/input/keyboard.h>
 #endif
 
+#include <mcp/mcp_lvgl_common_private.h>
+
 #ifdef CONFIG_MCP_APPS_PEANUT_GB
 #include <mcp/peanut_gb.h>
 #endif
@@ -65,6 +67,7 @@ struct kbd_s {
   int fd;
   struct kbd_lv_key_s last_key_event;
   bool has_last_key_event;
+  uint8_t modifier_data;
   lv_indev_state_t last_state;
 };
 #endif
@@ -72,6 +75,104 @@ struct kbd_s {
 /****************************************************************************
  * Private Data
  ****************************************************************************/
+
+static const char shift_lut[] = {
+  ' ', /* ' ' */
+  '!', /* ! */
+  '"', /* " */
+  '#', /* # */
+  '$', /* $ */
+  '%', /* % */
+  '&', /* & */
+  '"', /* ' */
+  '(', /* ( */
+  ')', /* ) */
+  '*', /* * */
+  '+', /* + */
+  '<', /* , */
+  '_', /* - */
+  '>', /* . */
+  '?', /* / */
+  ')', /* 0 */
+  '!', /* 1 */
+  '@', /* 2 */
+  '#', /* 3 */
+  '$', /* 4 */
+  '%', /* 5 */
+  '^', /* 6 */
+  '&', /* 7 */
+  '*', /* 8 */
+  '(', /* 9 */
+  ':', /* : */
+  ':', /* ; */
+  '<', /* < */
+  '+', /* = */
+  '>', /* > */
+  '?', /* ? */
+  '@', /* @ */
+  'A', /* A */
+  'B', /* B */
+  'C', /* C */
+  'D', /* D */
+  'E', /* E */
+  'F', /* F */
+  'G', /* G */
+  'H', /* H */
+  'I', /* I */
+  'J', /* J */
+  'K', /* K */
+  'L', /* L */
+  'M', /* M */
+  'N', /* N */
+  'O', /* O */
+  'P', /* P */
+  'Q', /* Q */
+  'R', /* R */
+  'S', /* S */
+  'T', /* T */
+  'U', /* U */
+  'V', /* V */
+  'W', /* W */
+  'X', /* X */
+  'Y', /* Y */
+  'Z', /* Z */
+  '{', /* [ */
+  '|', /* \ */
+  '}', /* ] */
+  '^', /* ^ */
+  '_', /* _ */
+  '~', /* ` */
+  'A', /* a */
+  'B', /* b */
+  'C', /* c */
+  'D', /* d */
+  'E', /* e */
+  'F', /* f */
+  'G', /* g */
+  'H', /* h */
+  'I', /* i */
+  'J', /* j */
+  'K', /* k */
+  'L', /* l */
+  'M', /* m */
+  'N', /* n */
+  'O', /* o */
+  'P', /* p */
+  'Q', /* q */
+  'R', /* r */
+  'S', /* s */
+  'T', /* t */
+  'U', /* u */
+  'V', /* v */
+  'W', /* w */
+  'X', /* x */
+  'Y', /* y */
+  'Z', /* z */
+  '{', /* { */
+  '|', /* | */
+  '}', /* } */
+  '~'  /* ~ */
+};
 
 /****************************************************************************
  * Private Functions
@@ -100,7 +201,7 @@ static void lv_nuttx_uv_loop(uv_loop_t *loop, lv_nuttx_result_t *result)
 #endif
 
 #ifdef CONFIG_SIM_KEYBOARD
-static bool kbd_try_read_key(int fd, struct kbd_lv_key_s * key_event_lv)
+static bool kbd_try_read_key(uint8_t * modifiers, int fd, struct kbd_lv_key_s * key_event_lv)
 {
   ssize_t rwres;
 
@@ -113,6 +214,25 @@ static bool kbd_try_read_key(int fd, struct kbd_lv_key_s * key_event_lv)
       case XK_Right:    key_event_lv->key = LV_KEY_RIGHT;     break;
       case XK_Return:   key_event_lv->key = LV_KEY_ENTER;     break;
       case XK_Escape:   key_event_lv->key = LV_KEY_ESC;       break;
+      case XK_Tab:      key_event_lv->key = *modifiers ? LV_KEY_PREV : LV_KEY_NEXT; break;
+      case XK_Delete:   key_event_lv->key = LV_KEY_DEL;       break;
+      case XK_BackSpace:key_event_lv->key = LV_KEY_BACKSPACE; break;
+      case XK_Home:     key_event_lv->key = LV_KEY_HOME;      break;
+      case XK_End:      key_event_lv->key = LV_KEY_END;       break;
+      case XK_Shift_L:
+      case XK_Shift_R: {
+        uint8_t mask = 1 << (key_event.code == XK_Shift_R);
+        if(key_event.type == KEYBOARD_PRESS) {
+          *modifiers |= mask;
+        } else {
+          *modifiers &= ~mask;
+        }
+        continue;
+      }
+      case ' ' ... '~':
+        key_event_lv->key = *modifiers ? shift_lut[key_event.code - ' ']
+                                       : key_event.code;
+        break;
       default:
         continue;
     }
@@ -131,11 +251,11 @@ static void kbd_read(lv_indev_t * indev, lv_indev_data_t * data)
 {
   struct kbd_s * kbd = lv_indev_get_driver_data(indev);
 
-  if(kbd->has_last_key_event || kbd_try_read_key(kbd->fd, &kbd->last_key_event)) {
+  if(kbd->has_last_key_event || kbd_try_read_key(&kbd->modifier_data, kbd->fd, &kbd->last_key_event)) {
     data->key = kbd->last_key_event.key;
     kbd->last_state = kbd->last_key_event.state;
 
-    bool another_key_was_read = kbd_try_read_key(kbd->fd, &kbd->last_key_event);
+    bool another_key_was_read = kbd_try_read_key(&kbd->modifier_data, kbd->fd, &kbd->last_key_event);
     kbd->has_last_key_event = another_key_was_read;
     data->continue_reading  = another_key_was_read;
   }
@@ -154,6 +274,7 @@ static lv_indev_t * kbd_create(struct kbd_s * kbd)
   assert(kbd->fd >= 0);
 
   kbd->has_last_key_event = false;
+  kbd->modifier_data = 0;
   kbd->last_state = LV_INDEV_STATE_RELEASED;
 
   return indev;
@@ -226,6 +347,8 @@ int main(int argc, FAR char *argv[])
 
   lv_init();
 
+  mcp_lvgl_poll_init();
+
   lv_nuttx_dsc_init(&info);
 
 #ifdef CONFIG_LV_USE_NUTTX_LCD
@@ -282,23 +405,12 @@ int main(int argc, FAR char *argv[])
 #ifdef CONFIG_LV_USE_NUTTX_LIBUV
   lv_nuttx_uv_loop(&ui_loop, &result);
 #else
-
-  LV_LOG_USER("TEST LOG");
-
-  while (1)
-    {
-      uint32_t idle;
-      idle = lv_timer_handler();
-
-      /* Minimum sleep of 1ms */
-
-      idle = idle ? idle : 1;
-      usleep(idle * 1000);
-    }
+  mcp_lvgl_poll_run_until_done();
 #endif
 
 // demo_end:
   lv_nuttx_deinit(&result);
+  mcp_lvgl_poll_deinit();
   lv_deinit();
 
   return 0;

@@ -6,7 +6,7 @@
 menuconfig MCP_APPS_SIM_LVGL
 	tristate "sim_lvgl"
 	default n
-	depends on GRAPHICS_LVGL
+	depends on GRAPHICS_LVGL && MCP_APPS_MCP_LVGL_COMMON
 	---help---
 		Enable build the Light and Versatile Graphics Library Demo programs
 

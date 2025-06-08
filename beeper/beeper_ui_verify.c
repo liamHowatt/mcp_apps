@@ -131,6 +131,12 @@ static const lv_image_dsc_t * const emoji_table[64] = {
     &beeper_ui_sas_emoji_63
 };
 
+static void sas_matches_cb(lv_event_t * e)
+{
+    beeper_ui_t * c = lv_event_get_user_data(e);
+    beeper_task_sas_matches(c->task);
+}
+
 static void observer_cb(lv_observer_t * observer, lv_subject_t * subject)
 {
     lv_obj_t * body = lv_observer_get_target_obj(observer);
@@ -157,6 +163,14 @@ static void observer_cb(lv_observer_t * observer, lv_subject_t * subject)
                 lv_obj_t * emoji = lv_image_create(body);
                 lv_image_set_src(emoji, emoji_table[sas_emojis[i]]);
             }
+            lv_obj_t * label = lv_label_create(body);
+            lv_obj_add_flag(label, LV_OBJ_FLAG_FLEX_IN_NEW_TRACK);
+            lv_label_set_text_static(label, "Do they match?");
+            lv_obj_t * btn = lv_button_create(body);
+            lv_obj_add_flag(btn, LV_OBJ_FLAG_FLEX_IN_NEW_TRACK);
+            lv_obj_t * btn_label = lv_label_create(btn);
+            lv_label_set_text_static(btn_label, "Yes");
+            lv_obj_add_event_cb(btn, sas_matches_cb, LV_EVENT_CLICKED, c);
         }
         else {
             lv_obj_t * label = lv_label_create(body);

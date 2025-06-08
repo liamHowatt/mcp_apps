@@ -1,0 +1,5 @@
+ifneq ($(CONFIG_MCP_APPS_MCP_LVGL_COMMON),)
+CONFIGURED_APPS += $(APPDIR)/mcp_apps/mcp_lvgl_common
+CFLAGS += ${INCDIR_PREFIX}${APPDIR}/mcp_apps/mcp_lvgl_common/include
+CXXFLAGS += ${INCDIR_PREFIX}${APPDIR}/mcp_apps/mcp_lvgl_common/include
+endif

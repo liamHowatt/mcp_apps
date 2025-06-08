@@ -11,6 +11,8 @@
 #include <olm/olm.h>
 #include <olm/sas.h>
 
+#include <mcp/mcp_lvgl.h>
+
 typedef struct {
     WOLFSSL_CTX * wolfssl_ctx;
     struct addrinfo * peer;
@@ -27,15 +29,55 @@ typedef enum {
     BEEPER_TASK_DEVICE_KEY_STATUS_IS_VERIFIED
 } beeper_task_device_key_status_t;
 
+typedef uint8_t beeper_task_queue_item_t;
+typedef enum {
+    BEEPER_TASK_RECEIVED_EVENT_STOP,
+    BEEPER_TASK_RECEIVED_EVENT_SAS_MATCHES,
+} beeper_task_received_event_t;
+
+typedef struct {
+    char * key_id;
+    char * key_value;
+} key_list_key_t;
+
+typedef struct {
+    char * device_id;
+    bool was_signed_by_ssk;
+    uint32_t device_key_count;
+    key_list_key_t * device_keys;
+} key_list_device_t;
+
+typedef struct {
+    char * user_id;
+    bool outdated;
+    bool dont_save;
+    bool ssk_was_signed_by_master;
+    uint32_t device_count;
+    uint32_t master_key_count;
+    uint32_t self_signing_key_count;
+    key_list_device_t * devices;
+    key_list_key_t * master_keys;
+    key_list_key_t * self_signing_keys;
+} key_list_user_t;
+
+typedef struct {
+    char * linebuf;
+    size_t n;
+    FILE * f;
+} key_list_init_t_;
+
 struct beeper_task_t {
     char * username;
     char * password;
     beeper_task_event_cb_t event_cb;
     void * event_cb_user_data;
     char * upath;
-    // queue_t queue;
+    beeper_queue_t queue;
+    pthread_mutex_t queue_mutex;
     pthread_t thread;
 
+    uint64_t txnid;
+    uint64_t txnid_range_end;
     int rng_fd;
     beeper_task_https_ctx_t https_ctx;
     beeper_task_https_conn_t https_conn[2];
@@ -43,7 +85,13 @@ struct beeper_task_t {
     char * auth_header;
     char * device_id;
     OlmAccount * olm_account;
-    unsigned long long txid;
+
+    // bool key_list_got_initial_changes;
+    bool key_list_has_outdated;
+    uint8_t key_list_needs_save;
+    char * key_list_current_batch;
+    uint32_t key_list_user_count;
+    key_list_user_t * key_list_users;
 };
 
 typedef struct {
@@ -61,14 +109,32 @@ typedef struct {
     int capture_data_capacity;
 } stream_data_t;
 
+#define DEBUG 1
+#if DEBUG
+    #define debug(fmt, ...) do { \
+        fprintf(stderr, fmt "\n", ##__VA_ARGS__); \
+        fflush(stderr); \
+    } while(0)
+#else
+    #define debug(fmt, ...)
+#endif
+
 #define STRING_LITERAL_LEN(s) (sizeof(s) - 1)
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
 
 #define BEEPER_MATRIX_URL "matrix.beeper.com"
 #define ONE_TIME_KEY_COUNT_TARGET 10
 
+#define TXNID_INCREMNET 0x10000ull
+
 #define HEADERS_ALLOC_CHUNK_SZ 1000
+#define DUMMY_BUF_SIZE 64
 #define OK_STATUS_START "HTTP/1.1 2"
 #define CONTENT_LENGTH_HEADER "\r\nContent-Length:"
+
+#define SENDTODEVICE_PATH_FMT(event_type) "sendToDevice/"event_type"/%016"PRIX64
+#define SENDTODEVICE_PATH_SIZE(event_type) (STRING_LITERAL_LEN("sendToDevice/"event_type"/") + 16)
 
 static const unsigned char beeper_matrix_root_cert[] = R"(-----BEGIN CERTIFICATE-----
 MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw
@@ -103,6 +169,105 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
 -----END CERTIFICATE-----
 )";
 
+static void * asserting_calloc(size_t nmemb, size_t size)
+{
+    void * ret = calloc(nmemb, size);
+    assert(ret);
+    return ret;
+}
+
+static void * asserting_malloc(size_t size)
+{
+    void * ret = malloc(size);
+    assert(ret);
+    return ret;
+}
+
+static void * asserting_realloc(void * ptr, size_t size)
+{
+    void * ret = realloc(ptr, size);
+    assert(ret);
+    return ret;
+}
+
+static char * asserting_strdup(const char * s)
+{
+    char * new_s = strdup(s);
+    assert(new_s);
+    return new_s;
+}
+
+static char * txnid_make_path_(beeper_task_t * t)
+{
+    char * txnid_path;
+    int res = asprintf(&txnid_path, "%stxnid", t->upath);
+    assert(res != -1);
+    return txnid_path;
+}
+
+static void txnid_range_end_update_(beeper_task_t * t, char * txnid_path)
+{
+    int res, fd;
+    ssize_t rwres;
+    char txnid_buf[17];
+
+    char * free_me = NULL;
+    if(txnid_path == NULL) {
+        txnid_path = free_me = txnid_make_path_(t);
+    }
+
+    t->txnid_range_end = t->txnid + TXNID_INCREMNET;
+
+    sprintf(txnid_buf, "%016"PRIX64, t->txnid_range_end);
+    fd = open(txnid_path, O_CREAT | O_TRUNC | O_WRONLY, 0644);
+    assert(fd >= 0);
+    rwres = write(fd, txnid_buf, 16);
+    assert(rwres == 16);
+    res = close(fd);
+    assert(res == 0);
+
+    free(free_me);
+}
+
+/* txnIds are supposed to be unique only per access token,
+   but Element Web misbehaves unless it is unique per
+   device id. */
+static void txnid_init(beeper_task_t * t)
+{
+    int res, fd;
+    ssize_t rwres;
+    char txnid_buf[17];
+
+    char * txnid_path = txnid_make_path_(t);
+
+    fd = open(txnid_path, O_RDONLY);
+    if(fd < 0) {
+        assert(errno == ENOENT);
+        t->txnid = 0;
+    }
+    else {
+        rwres = read(fd, txnid_buf, 16);
+        assert(rwres == 16);
+        txnid_buf[16] = '\0';
+        res = close(fd);
+        assert(res == 0);
+        t->txnid = strtoull(txnid_buf, NULL, 16);
+    }
+
+    txnid_range_end_update_(t, txnid_path);
+
+    free(txnid_path);
+}
+
+static uint64_t txnid_next(beeper_task_t * t)
+{
+    if(t->txnid == t->txnid_range_end) {
+        txnid_range_end_update_(t, NULL);
+    }
+
+    return t->txnid++;
+}
+
 static void * gen_random(int rng_fd, size_t n)
 {
     void * random_data = malloc(n);
@@ -132,7 +297,7 @@ static void pickle_account(beeper_task_t * t)
     free(account_pickle);
 }
 
-cJSON * get_n_one_time_keys(beeper_task_t * t, int n)
+static cJSON * get_n_one_time_keys(beeper_task_t * t, int n)
 {
     size_t otks_buf_len = olm_account_one_time_keys_length(t->olm_account);
     char * otks_buf = malloc(otks_buf_len);
@@ -141,6 +306,7 @@ cJSON * get_n_one_time_keys(beeper_task_t * t, int n)
     assert(olm_res == otks_buf_len);
 
     cJSON * otks_json = cJSON_ParseWithLength(otks_buf, otks_buf_len);
+    free(otks_buf);
     int otks_n = cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(otks_json, "curve25519"));
     assert(otks_n <= n); /* assured by the usage pattern */
 
@@ -157,17 +323,17 @@ cJSON * get_n_one_time_keys(beeper_task_t * t, int n)
         free(random);
 
         otks_buf_len = olm_account_one_time_keys_length(t->olm_account);
-        otks_buf = realloc(otks_buf, otks_buf_len);
+        otks_buf = malloc(otks_buf_len);
         assert(otks_buf);
         olm_res = olm_account_one_time_keys(t->olm_account, otks_buf, otks_buf_len);
         assert(olm_res == otks_buf_len);
 
         otks_json = cJSON_ParseWithLength(otks_buf, otks_buf_len);
+        free(otks_buf);
         otks_n = cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(otks_json, "curve25519"));
         assert(otks_n == n);
     }
 
-    free(otks_buf);
     return otks_json;
 }
 
@@ -175,6 +341,19 @@ static cJSON * unwrap_cjson(cJSON * item)
 {
     assert(item);
     return item;
+}
+
+static bool cjson_array_has_string(cJSON * array, const char * string)
+{
+    cJSON * child;
+    cJSON_ArrayForEach(child, array) {
+        char * child_str_val = cJSON_GetStringValue(child);
+        assert(child_str_val);
+        if(0 == strcmp(child_str_val, string)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static void https_ctx_init(beeper_task_https_ctx_t * ctx)
@@ -250,10 +429,21 @@ static void https_conn_deinit(beeper_task_https_conn_t * conn)
     assert(0 == close(fd));
 }
 
+static void dummy_read(WOLFSSL * wolfssl_ssl, int len)
+{
+    for( ; len > 0; len -= DUMMY_BUF_SIZE) {
+        uint8_t dummy_buf[DUMMY_BUF_SIZE];
+        int res = wolfSSL_read(wolfssl_ssl, dummy_buf, len < DUMMY_BUF_SIZE ? len : DUMMY_BUF_SIZE);
+        assert(res > 0);
+    }
+}
+
 static void request_send(beeper_task_https_conn_t * conn, const char * method, const char * path,
                          const char * extra_headers, const char * json_str)
 {
     int res;
+
+    debug("%s %s", method, path);
 
     char * req;
     int req_len;
@@ -306,10 +496,7 @@ static int request_read_chunk_size(beeper_task_https_conn_t * conn)
 
 static void request_skip_chunk_trailer(beeper_task_https_conn_t * conn)
 {
-    int res;
-    char chunk_end_buf[2];
-    res = wolfSSL_read(conn->wolfssl_ssl, chunk_end_buf, 2); /* skip trailing \r\n */
-    assert(res > 0);
+    dummy_read(conn->wolfssl_ssl, 2); /* skip trailing \r\n */
 }
 
 static bool request_recv(beeper_task_https_conn_t * conn, int * resp_len_out,
@@ -372,50 +559,61 @@ static bool request_recv(beeper_task_https_conn_t * conn, int * resp_len_out,
     }
     free(head);
     if(!has_content) {
-        *resp_len_out = 0;
+        if(resp_len_out) *resp_len_out = 0;
+        if(resp_out) *resp_out = NULL;
         return true;
     }
 
     if(read_resp_now) {
         char * resp;
         if(content_len != -1) {
-            resp = malloc(content_len + 1);
-            assert(resp);
-            res = wolfSSL_read(conn->wolfssl_ssl, resp, content_len);
-            assert(res > 0);
+            if(resp_out) {
+                resp = asserting_malloc(content_len + 1);
+                res = wolfSSL_read(conn->wolfssl_ssl, resp, content_len);
+                assert(res > 0);
+            }
+            else {
+                dummy_read(conn->wolfssl_ssl, content_len);
+            }
         }
         else {
             content_len = 0;
-            resp = malloc(1);
-            assert(resp);
+            if(resp_out) {
+                resp = asserting_malloc(1);
+            }
             int chunk_sz;
             do {
                 chunk_sz = request_read_chunk_size(conn);
                 if(chunk_sz) {
-                    resp = realloc(resp, content_len + chunk_sz + 1);
-                    assert(resp);
-                    res = wolfSSL_read(conn->wolfssl_ssl, &resp[content_len], chunk_sz);
-                    assert(res > 0);
+                    if(resp_out) {
+                        resp = asserting_realloc(resp, content_len + chunk_sz + 1);
+                        res = wolfSSL_read(conn->wolfssl_ssl, &resp[content_len], chunk_sz);
+                        assert(res > 0);
+                    }
+                    else {
+                        dummy_read(conn->wolfssl_ssl, chunk_sz);
+                    }
                     content_len += chunk_sz;
                 }
                 request_skip_chunk_trailer(conn);
             } while(chunk_sz);
         }
-        resp[content_len] = '\0';
-        *resp_out = resp;
+        if(resp_out) {
+            resp[content_len] = '\0';
+            *resp_out = resp;
+        }
     }
 
-    *resp_len_out = content_len;
+    if(resp_len_out) *resp_len_out = content_len;
     return true;
 }
 
 static char * request(beeper_task_https_conn_t * conn, const char * method, const char * path,
-                      const char * extra_headers, const char * json_str)
+                      const char * extra_headers, const char * json_str, bool save_response)
 {
     request_send(conn, method, path, extra_headers, json_str);
-    char * resp;
-    int resp_len;
-    request_recv(conn, &resp_len, true, NULL, true, &resp);
+    char * resp = NULL;
+    request_recv(conn, NULL, true, NULL, true, save_response ? &resp : NULL);
     return resp;
 }
 
@@ -471,98 +669,514 @@ static cJSON * sign_json(beeper_task_t * t, cJSON * json)
     return ret_obj;
 }
 
-static beeper_task_device_key_status_t device_key_status(beeper_task_t * t, beeper_task_https_conn_t * conn)
+static bool verify_signature(OlmUtility * olm_verify, cJSON * to_verify,
+                             const char * user_id, const key_list_key_t * key_pool, uint32_t key_pool_len)
 {
-    char * keys_query_json_str;
-    assert(-1 != asprintf(&keys_query_json_str, "{\"device_keys\":{\"%s\":[\"%s\"]},\"timeout\":10000}",
-                          t->user_id, t->device_id));
-    // cJSON * keys_query_json = unwrap_cjson(cJSON_CreateObject());
-    // cJSON * keys_query_json_device_id_array;
-    // {
-    //     cJSON * device_keys = unwrap_cjson(cJSON_CreateObject());
-    //     cJSON_AddItemToObjectCS(keys_query_json, "device_keys", device_keys);
-
-    //     keys_query_json_device_id_array = unwrap_cjson(cJSON_CreateArray());
-    //     cJSON_AddItemToObjectCS(device_keys, t->user_id, keys_query_json_device_id_array);
-    //     cJSON_AddItemToArray(keys_query_json_device_id_array,
-    //                          unwrap_cjson(cJSON_CreateStringReference(t->device_id)));
-
-    //     cJSON_AddItemToObjectCS(keys_query_json, "timeout",
-    //                             unwrap_cjson(cJSON_CreateNumber(10000)));
-    // }
-    // char * keys_query_json_str = cJSON_PrintUnformatted(keys_query_json);
-    // assert(keys_query_json_str);
-
-    char * resp_str = request(conn, "POST", "keys/query",
-                              t->auth_header, keys_query_json_str);
-    assert(resp_str);
-    free(keys_query_json_str);
-
-    cJSON * resp_json = unwrap_cjson(cJSON_Parse(resp_str));
-    free(resp_str);
-    beeper_task_device_key_status_t ret = BEEPER_TASK_DEVICE_KEY_STATUS_IS_VERIFIED;
-    {
-        // Devices which haven't uploaded their keys
-        // yet do not have an entry in the response.
-        cJSON * device_keys = unwrap_cjson(cJSON_GetObjectItemCaseSensitive(
-            unwrap_cjson(cJSON_GetObjectItemCaseSensitive(resp_json, "device_keys")),
-            t->user_id
-        ));
-        cJSON * this_device = cJSON_GetObjectItemCaseSensitive(device_keys, t->device_id);
-        if(!this_device) {
-            ret = BEEPER_TASK_DEVICE_KEY_STATUS_NOT_UPLOADED;
-            goto ret_out;
-        }
-
-        // Unverified devices' keys are
-        // NOT signed by the self signing key,
-        cJSON * self_signing_keys = unwrap_cjson(cJSON_GetObjectItemCaseSensitive(
-            unwrap_cjson(cJSON_GetObjectItemCaseSensitive(resp_json, "self_signing_keys")),
-            t->user_id
-        ));
-        cJSON * ssk_keys = unwrap_cjson(cJSON_GetObjectItemCaseSensitive(self_signing_keys, "keys"));
-        assert(cJSON_IsObject(ssk_keys));
-        assert(cJSON_GetArraySize(ssk_keys) == 1);
-        cJSON * ssk_key = ssk_keys->child;
-        char * ssk_key_id = ssk_key->string;
-
-        cJSON * this_device_signatures = unwrap_cjson(cJSON_GetObjectItemCaseSensitive(
-            unwrap_cjson(cJSON_GetObjectItemCaseSensitive(this_device, "signatures")),
-            t->user_id
-        ));
-        cJSON * this_device_ssk_signature = cJSON_GetObjectItemCaseSensitive(this_device_signatures, ssk_key_id);
-        if(!this_device_ssk_signature) {
-            ret = BEEPER_TASK_DEVICE_KEY_STATUS_NOT_VERIFIED;
-            goto ret_out;
-        }
-
-        // if the signatures are all valid, this device is verified
-        // cJSON * master_keys = unwrap_cjson(cJSON_GetObjectItemCaseSensitive(
-        //     unwrap_cjson(cJSON_GetObjectItemCaseSensitive(resp_json, "master_keys")),
-        //     t->user_id
-        // ));
-        // cJSON * master_keys_signatures = unwrap_cjson(cJSON_GetObjectItemCaseSensitive(
-        //     unwrap_cjson(cJSON_GetObjectItemCaseSensitive(
-        //         master_keys,
-        //         "signatures"
-        //     )),
-        //     t->user_id
-        // ));
-        // assert(cJSON_IsObject(master_keys_signatures));
-        // assert(cJSON_GetArraySize(master_keys_signatures) == 1);
-        // cJSON * master_keys_signature = master_keys_signatures->child;
-        // char * master_keys_signature_id = master_keys_signature->string;
-        // assert(0 == strncmp("ed25519:", master_keys_signature_id, 8));
-        // char * master_device_id = &master_keys_signature_id[8];
-
-        // cJSON_AddItemToArray(keys_query_json_device_id_array,
-        //                      unwrap_cjson(cJSON_CreateStringReference(master_device_id)));
+    cJSON * sigs = cJSON_GetObjectItemCaseSensitive(to_verify, "signatures");
+    cJSON * user_sigs = cJSON_GetObjectItemCaseSensitive(sigs, user_id);
+    if(!user_sigs) {
+        return false;
     }
 
-ret_out:
-    cJSON_Delete(resp_json);
-    // cJSON_Delete(keys_query_json);
+    char * supposed_signature = NULL;
+    char * key;
+    for(uint32_t i = 0; i < key_pool_len; i++) {
+        cJSON * user_sig = cJSON_GetObjectItemCaseSensitive(user_sigs, key_pool[i].key_id);
+        if(user_sig) {
+            supposed_signature = cJSON_GetStringValue(user_sig);
+            assert(supposed_signature);
+            key = key_pool[i].key_value;
+            break;
+        }
+    }
+    if(!supposed_signature) {
+        return false;
+    }
+
+    cJSON_DetachItemViaPointer(to_verify, sigs);
+    cJSON * unsigned_ = cJSON_DetachItemFromObjectCaseSensitive(to_verify, "unsigned");
+
+    char * stringified = canonical_json(to_verify);
+
+    void * free_me = NULL;
+    if(!olm_verify) {
+        olm_verify = free_me = asserting_malloc(olm_utility_size());
+    }
+    olm_utility(olm_verify);
+
+    size_t olm_verify_res = olm_ed25519_verify(olm_verify,
+                                               key, strlen(key),
+                                               stringified, strlen(stringified),
+                                               supposed_signature, strlen(supposed_signature));
+    bool ret = olm_verify_res == 0;
+
+    olm_clear_utility(olm_verify);
+    free(free_me);
+
+    free(stringified);
+
+    cJSON_AddItemToObjectCS(to_verify, "signatures", sigs);
+    cJSON_AddItemToObjectCS(to_verify, "unsigned", unsigned_);
+
     return ret;
+}
+
+static char * key_list_make_path_(beeper_task_t * t)
+{
+    char * key_list_path;
+    int res = asprintf(&key_list_path, "%skey_list", t->upath);
+    assert(res >= 0);
+    return key_list_path;
+}
+
+static void key_list_key_free_array_(key_list_key_t * keys, uint32_t length) {
+    for(uint32_t i = 0; i < length; i++) {
+        free(keys[i].key_id);
+        free(keys[i].key_value);
+    }
+    free(keys);
+}
+
+static void key_list_devices_free_(key_list_user_t * user)
+{
+    for(uint32_t i = 0; i < user->device_count; i++) {
+        free(user->devices[i].device_id);
+        key_list_key_free_array_(user->devices[i].device_keys, user->devices[i].device_key_count);
+    }
+    free(user->devices);
+}
+
+static void key_list_user_free_(key_list_user_t * user)
+{
+    free(user->user_id);
+    key_list_devices_free_(user);
+    key_list_key_free_array_(user->master_keys, user->master_key_count);
+    key_list_key_free_array_(user->self_signing_keys, user->self_signing_key_count);
+}
+
+static char * key_list_init_getline_helper_(key_list_init_t_ * dat)
+{
+    ssize_t res;
+    assert(1 < (res = getline(&dat->linebuf, &dat->n, dat->f)));
+    dat->linebuf[res - 1] = '\0'; /* replace the \n with \0 */
+    char * ret = strdup(dat->linebuf);
+    assert(ret);
+    return ret;
+}
+
+static uint32_t key_list_init_scan_helper_(FILE * f)
+{
+    uint32_t num;
+    assert(1 == fscanf(f, "%"SCNu32"\n", &num));
+    return num;
+}
+
+static void key_list_init_read_keys_helper_(key_list_key_t ** keys, uint32_t * count, key_list_init_t_ * dat)
+{
+    *count = key_list_init_scan_helper_(dat->f);
+    if(*count) *keys = asserting_malloc(*count * sizeof(**keys));
+    for(uint32_t i = 0; i < *count; i++) {
+        key_list_key_t * key = &(*keys)[i];
+        key->key_id = key_list_init_getline_helper_(dat);
+        key->key_value = key_list_init_getline_helper_(dat);
+    }
+}
+
+static void key_list_init(beeper_task_t * t)
+{
+    char * path = key_list_make_path_(t);
+    FILE * f = fopen(path, "r");
+    free(path);
+    if(!f) {
+        assert(errno == ENOENT);
+        // t->key_list_got_initial_changes = true;
+        return;
+    }
+
+    key_list_init_t_ dat = {
+        .linebuf = NULL,
+        .n = 0,
+        .f = f
+    };
+
+    t->key_list_current_batch = key_list_init_getline_helper_(&dat);
+    t->key_list_user_count = key_list_init_scan_helper_(f);
+    if(t->key_list_user_count) t->key_list_users = asserting_calloc(t->key_list_user_count, sizeof(*t->key_list_users));
+    for(uint32_t i = 0; i < t->key_list_user_count; i++) {
+        key_list_user_t * user = &t->key_list_users[i];
+        user->user_id = key_list_init_getline_helper_(&dat);
+        user->ssk_was_signed_by_master = key_list_init_scan_helper_(f);
+        user->device_count = key_list_init_scan_helper_(f);
+        if(user->device_count) user->devices = asserting_calloc(user->device_count, sizeof(*user->devices));
+        for(uint32_t j = 0; j < user->device_count; j++) {
+            key_list_device_t * device = &user->devices[j];
+            device->device_id = key_list_init_getline_helper_(&dat);
+            device->was_signed_by_ssk = key_list_init_scan_helper_(f);
+            key_list_init_read_keys_helper_(&device->device_keys, &device->device_key_count, &dat);
+        }
+        key_list_init_read_keys_helper_(&user->master_keys, &user->master_key_count, &dat);
+        key_list_init_read_keys_helper_(&user->self_signing_keys, &user->self_signing_key_count, &dat);
+    }
+
+    free(dat.linebuf);
+    assert(0 == fclose(f));
+}
+
+static void key_list_update_helper_(cJSON * keys_json, key_list_key_t ** res, uint32_t * res_len)
+{
+    uint32_t arr_len = cJSON_GetArraySize(keys_json);
+    key_list_key_t * arr = arr_len ? asserting_malloc(arr_len * sizeof(*arr)) : NULL;
+    assert(cJSON_IsObject(keys_json));
+    uint32_t j = 0;
+    cJSON * key_json;
+    cJSON_ArrayForEach(key_json, keys_json) {
+        arr[j].key_id = asserting_strdup(key_json->string);
+        char * strval = cJSON_GetStringValue(key_json);
+        assert(strval);
+        arr[j].key_value = asserting_strdup(strval);
+
+        j++;
+    }
+
+    *res = arr;
+    *res_len = arr_len;
+}
+
+static void key_list_update_(beeper_task_t * t)
+{
+    if(!t->key_list_has_outdated) {
+        return;
+    }
+    t->key_list_has_outdated = false;
+
+    cJSON * req_json = unwrap_cjson(cJSON_CreateObject());
+    cJSON * req_json_device_keys = unwrap_cjson(cJSON_CreateObject());
+    cJSON * req_json_timeout = unwrap_cjson(cJSON_CreateNumber(10000));
+    cJSON_AddItemToObjectCS(req_json, "device_keys", req_json_device_keys);
+    cJSON_AddItemToObjectCS(req_json, "timeout", req_json_timeout);
+
+    for(uint32_t i = 0; i < t->key_list_user_count; i++)
+    {
+        key_list_user_t * user = &t->key_list_users[i];
+
+        if(!user->outdated) {
+            continue;
+        }
+
+        cJSON * device_array = unwrap_cjson(cJSON_CreateArray());
+        cJSON_AddItemToObjectCS(req_json_device_keys, user->user_id, device_array);
+
+        assert(user->device_count > 0);
+        for(uint32_t j = 0; j < user->device_count; j++) {
+            cJSON_AddItemToArray(device_array, unwrap_cjson(cJSON_CreateStringReference(user->devices[j].device_id)));
+        }
+    }
+
+    char * req_json_str = cJSON_PrintUnformatted(req_json);
+    assert(req_json_str);
+    cJSON_Delete(req_json);
+
+    char * resp = request(&t->https_conn[0], "POST", "keys/query", t->auth_header, req_json_str, true);
+    free(req_json_str);
+    cJSON * resp_json = unwrap_cjson(cJSON_Parse(resp));
+    free(resp);
+
+    cJSON * device_keys_json = cJSON_GetObjectItemCaseSensitive(resp_json, "device_keys");
+    cJSON * master_keys_json = cJSON_GetObjectItemCaseSensitive(resp_json, "master_keys");
+    cJSON * self_signing_keys_json = cJSON_GetObjectItemCaseSensitive(resp_json, "self_signing_keys");
+
+    OlmUtility * olm_verify = NULL;
+    for(uint32_t i = 0; i < t->key_list_user_count; i++)
+    {
+        key_list_user_t * user = &t->key_list_users[i];
+
+        if(!user->outdated) {
+            continue;
+        }
+        user->outdated = false;
+
+        user->ssk_was_signed_by_master = false;
+
+        bool had_something = false;
+
+        key_list_key_free_array_(user->master_keys, user->master_key_count);
+        user->master_key_count = 0;
+        user->master_keys = NULL;
+        cJSON * msk_keys_json = cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(master_keys_json, user->user_id), "keys");
+        if(msk_keys_json) {
+            had_something = true;
+            key_list_update_helper_(msk_keys_json, &user->master_keys, &user->master_key_count);
+        }
+
+        key_list_key_free_array_(user->self_signing_keys, user->self_signing_key_count);
+        user->self_signing_key_count = 0;
+        user->self_signing_keys = NULL;
+        user->ssk_was_signed_by_master = false;
+        cJSON * ssk_json = cJSON_GetObjectItemCaseSensitive(self_signing_keys_json, user->user_id);
+        cJSON * ssk_keys_json = cJSON_GetObjectItemCaseSensitive(ssk_json, "keys");
+        if(ssk_keys_json) {
+            key_list_update_helper_(ssk_keys_json, &user->self_signing_keys, &user->self_signing_key_count);
+            if(user->self_signing_key_count) {
+                had_something = true;
+                if(!olm_verify) olm_verify = asserting_malloc(olm_utility_size());
+                user->ssk_was_signed_by_master = verify_signature(olm_verify, ssk_json, user->user_id, user->master_keys, user->master_key_count);
+            }
+        }
+
+        cJSON * dk_json = cJSON_GetObjectItemCaseSensitive(device_keys_json, user->user_id);
+        for(uint32_t j = 0; j < user->device_count; j++) {
+            key_list_device_t * device = &user->devices[j];
+            cJSON * device_json = cJSON_GetObjectItemCaseSensitive(dk_json, device->device_id);
+            cJSON * device_keys_json = cJSON_GetObjectItemCaseSensitive(device_json, "keys");
+            if(device_json) {
+                key_list_key_free_array_(device->device_keys, device->device_key_count);
+                device->device_key_count = 0;
+                device->device_keys = NULL;
+                device->was_signed_by_ssk = false;
+            }
+            if(!device_keys_json) {
+                if(device->device_key_count) {
+                    had_something = true;
+                }
+                continue;
+            }
+            key_list_update_helper_(device_keys_json, &device->device_keys, &device->device_key_count);
+            if(device->device_key_count) {
+                had_something = true;
+                if(!olm_verify) olm_verify = asserting_malloc(olm_utility_size());
+                device->was_signed_by_ssk = verify_signature(olm_verify, device_json, user->user_id, user->self_signing_keys, user->self_signing_key_count);
+            }
+        }
+
+        user->dont_save = !had_something;
+        if(had_something) {
+            t->key_list_needs_save = 2;
+        }
+    }
+    free(olm_verify);
+
+    cJSON_Delete(resp_json);
+}
+
+static void key_list_save_writestr_helper_(const char * s, FILE * f)
+{
+    assert(EOF != fputs(s, f));
+    assert(EOF != putc('\n', f));
+}
+
+static void key_list_save_writeu32_helper_(uint32_t u, FILE * f)
+{
+    assert(0 <= fprintf(f, "%"PRIu32"\n", u));
+}
+
+static void key_list_save_writekeys_helper_(key_list_key_t * keys, uint32_t count, FILE * f)
+{
+    key_list_save_writeu32_helper_(count, f);
+    for(uint32_t i = 0; i < count; i++) {
+        key_list_key_t * key = &keys[i];
+        key_list_save_writestr_helper_(key->key_id, f);
+        key_list_save_writestr_helper_(key->key_value, f);
+    }
+}
+
+static void key_list_save(beeper_task_t * t)
+{
+    if(!t->key_list_current_batch) {
+        return;
+    }
+
+    key_list_update_(t);
+
+    if(!t->key_list_needs_save) {
+        return;
+    }
+    t->key_list_needs_save = 0;
+
+    debug("saving key list");
+
+    char * path = key_list_make_path_(t);
+    FILE * f = fopen(path, "w");
+    assert(f);
+    free(path);
+
+    key_list_save_writestr_helper_(t->key_list_current_batch, f);
+    uint32_t saving_user_count = 0;
+    for(uint32_t i = 0; i < t->key_list_user_count; i++)
+        saving_user_count += !t->key_list_users[i].dont_save;
+    key_list_save_writeu32_helper_(saving_user_count, f);
+    for(uint32_t i = 0; i < t->key_list_user_count; i++) {
+        key_list_user_t * user = &t->key_list_users[i];
+        if(user->dont_save)
+            continue;
+        key_list_save_writestr_helper_(user->user_id, f);
+        key_list_save_writeu32_helper_(user->ssk_was_signed_by_master, f);
+        uint32_t saving_device_count = 0;
+        for(uint32_t j = 0; j < user->device_count; j++)
+            saving_device_count += 0 < user->devices[j].device_key_count;
+        key_list_save_writeu32_helper_(saving_device_count, f);
+        for(uint32_t j = 0; j < user->device_count; j++) {
+            key_list_device_t * device = &user->devices[j];
+            if(!device->device_key_count)
+                continue;
+            key_list_save_writestr_helper_(device->device_id, f);
+            key_list_save_writeu32_helper_(device->was_signed_by_ssk, f);
+            key_list_save_writekeys_helper_(device->device_keys, device->device_key_count, f);
+        }
+        key_list_save_writekeys_helper_(user->master_keys, user->master_key_count, f);
+        key_list_save_writekeys_helper_(user->self_signing_keys, user->self_signing_key_count, f);
+    }
+
+    assert(0 == fclose(f));
+}
+
+static bool key_list_should_save(beeper_task_t * t)
+{
+    return t->key_list_current_batch && (t->key_list_has_outdated || t->key_list_needs_save >= 2);
+}
+
+static void key_list_destroy(beeper_task_t * t)
+{
+    key_list_save(t);
+    free(t->key_list_current_batch);
+    for(uint32_t i = 0; i < t->key_list_user_count; i++) {
+        key_list_user_free_(&t->key_list_users[i]);
+    }
+    free(t->key_list_users);
+}
+
+static key_list_device_t * key_list_user_device_get(beeper_task_t * t, key_list_user_t * user, const char * device_id)
+{
+    key_list_device_t * device = NULL;
+
+    for(uint32_t i = 0; i < user->device_count; i++) {
+        if(0 == strcmp(user->devices[i].device_id, device_id)) {
+            device = &user->devices[i];
+            break;
+        }
+    }
+
+    if(!device) {
+        user->devices = asserting_realloc(user->devices, ++user->device_count * sizeof(*user->devices));
+        device = &user->devices[user->device_count - 1];
+        memset(device, 0, sizeof(*device));
+        device->device_id = asserting_strdup(device_id);
+        user->outdated = true;
+        t->key_list_has_outdated = true;
+    }
+
+    if(user->outdated) {
+        key_list_update_(t);
+    }
+
+    return device;
+}
+
+static key_list_user_t * key_list_user_get_(beeper_task_t * t, const char * user_id)
+{
+    uint32_t user_count = t->key_list_user_count;
+    key_list_user_t * users = t->key_list_users;
+    for(uint32_t i = 0; i < user_count; i++) {
+        key_list_user_t * user = &users[i];
+        if(0 == strcmp(user->user_id, user_id)) {
+            return user;
+        }
+    }
+
+    t->key_list_users = asserting_realloc(t->key_list_users, ++t->key_list_user_count * sizeof(*t->key_list_users));
+
+    key_list_user_t * user = &t->key_list_users[t->key_list_user_count - 1];
+
+    memset(user, 0, sizeof(*user));
+    user->user_id = asserting_strdup(user_id);
+    user->outdated = true;
+    t->key_list_has_outdated = true;
+
+    return user;
+}
+
+static void key_list_device_get(beeper_task_t * t, const char * user_id, key_list_user_t ** user_dst,
+                                                   const char * device_id, key_list_device_t ** device_dst)
+{
+    key_list_user_t * user = key_list_user_get_(t, user_id);
+    if(user_dst) *user_dst = user;
+    key_list_device_t * device = key_list_user_device_get(t, user, device_id);
+    if(device_dst) *device_dst = device;
+}
+
+static void key_list_apply_devicelists(beeper_task_t * t, cJSON * devicelists, char * next_batch)
+{
+    if(devicelists) {
+        cJSON * changed = cJSON_GetObjectItemCaseSensitive(devicelists, "changed");
+        cJSON * left = cJSON_GetObjectItemCaseSensitive(devicelists, "left");
+        assert(!changed || cJSON_IsArray(changed));
+        assert(!left || cJSON_IsArray(left));
+
+        if(changed || left) {
+            uint32_t original_user_count = t->key_list_user_count;
+
+            for(uint32_t i = 0; i < t->key_list_user_count; i++) {
+                if(left && cjson_array_has_string(left, t->key_list_users[i].user_id)) {
+                    key_list_user_free_(&t->key_list_users[i]);
+                    /* this slot is now a hole. fill it with the member at the end. */
+                    /* repeat this value of `i` in the next loop iteration */
+                    t->key_list_users[i] = t->key_list_users[t->key_list_user_count - 1];
+                    t->key_list_user_count--;
+                    i--;
+                    t->key_list_needs_save = 2;
+                }
+                else if(changed && cjson_array_has_string(changed, t->key_list_users[i].user_id)) {
+                    t->key_list_users[i].outdated = true;
+                    t->key_list_has_outdated = true;
+                }
+            }
+
+            if(original_user_count != t->key_list_user_count) {
+                if(t->key_list_user_count) {
+                    t->key_list_users = asserting_realloc(t->key_list_users, t->key_list_user_count * sizeof(*t->key_list_users));
+                } else {
+                    free(t->key_list_users);
+                    t->key_list_users = NULL;
+                }
+            }
+        }
+
+        cJSON_Delete(devicelists);
+    }
+
+    if(next_batch) {
+        // if(!t->key_list_got_initial_changes) {
+        //     t->key_list_got_initial_changes = true;
+
+        //     char * changes_path;
+        //     res = asprintf(&changes_path, "keys/changes?from=%s&to=%s", t->key_list_current_batch, next_batch);
+        //     assert(res >= 0);
+        //     char * changes_resp = request(&t->https_conn[0], "GET", changes_path, t->auth_header, NULL, true);
+        //     free(changes_path);
+        //     cJSON * changes_devicelists = unwrap_cjson(cJSON_Parse(changes_resp));
+        //     free(changes_resp);
+        //     key_list_apply_devicelists(t, changes_devicelists, NULL);
+        // }
+
+        free(t->key_list_current_batch);
+        t->key_list_current_batch = next_batch;
+        t->key_list_needs_save = t->key_list_needs_save > 1 ? t->key_list_needs_save : 1;
+    }
+}
+
+static beeper_task_device_key_status_t device_key_status(beeper_task_t * t)
+{
+    key_list_device_t * device;
+    key_list_device_get(t, t->user_id, NULL, t->device_id, &device);
+
+    if(device->device_key_count == 0) {
+        return BEEPER_TASK_DEVICE_KEY_STATUS_NOT_UPLOADED;
+    }
+
+    if(!device->was_signed_by_ssk) {
+        return BEEPER_TASK_DEVICE_KEY_STATUS_NOT_VERIFIED;
+    }
+
+    return BEEPER_TASK_DEVICE_KEY_STATUS_IS_VERIFIED;
 }
 
 static void stream_data_init(
@@ -671,6 +1285,148 @@ static const char * stream_data_get_capture(stream_data_t * sd, int start, int l
     return (char *) sd->capture_data + offset;
 }
 
+static void sas_process_peer_mac_and_send_done(
+    beeper_task_t * t,
+    cJSON * sas_peer_mac_content,
+    OlmSAS * sas_olm_sas,
+    const char * sas_device_id,
+    const char * sas_txid
+)
+{
+    char * info;
+    int info_len = asprintf(&info,
+        "MATRIX_KEY_VERIFICATION_MAC%s%s%s%s%sKEY_IDS",
+        t->user_id,
+        sas_device_id,
+        t->user_id,
+        t->device_id,
+        sas_txid
+    );
+    assert(info_len > 0);
+
+    char * key_ids[2];
+    char * key_macs[2];
+
+    cJSON * item = cJSON_GetObjectItemCaseSensitive(sas_peer_mac_content, "mac");
+    assert(cJSON_IsObject(item));
+    item = item->child;
+    assert(cJSON_IsString(item));
+    key_ids[0] = item->string;
+    key_macs[0] = item->valuestring;
+    item = item->next;
+    assert(cJSON_IsString(item));
+    key_ids[1] = item->string;
+    key_macs[1] = item->valuestring;
+    assert(item->next == NULL);
+
+    char * first_key;
+    char * second_key;
+    if(strcmp(key_ids[0], key_ids[1]) < 0) {
+        first_key = key_ids[0];
+        second_key = key_ids[1];
+    } else {
+        first_key = key_ids[1];
+        second_key = key_ids[0];
+    }
+
+    char * key_list;
+    int key_list_len = asprintf(&key_list, "%s,%s", first_key, second_key);
+    assert(key_list_len > 0);
+
+    size_t mac_len = olm_sas_mac_length(sas_olm_sas);
+    char * mac = asserting_malloc(mac_len);
+
+    size_t olm_mac_res = olm_sas_calculate_mac_fixed_base64(sas_olm_sas,
+                                               key_list, key_list_len,
+                                               info, info_len,
+                                               mac, mac_len);
+    assert(olm_mac_res == 0);
+
+    free(key_list);
+    free(info);
+
+    char * key_list_mac = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(sas_peer_mac_content, "keys"));
+    assert(key_list_mac);
+
+    assert(0 == strncmp(mac, key_list_mac, mac_len));
+
+    key_list_user_t * user;
+    key_list_device_t * peer_device;
+    key_list_device_get(t, t->user_id, &user, sas_device_id, &peer_device);
+    assert(user->master_key_count == 1);
+    assert(user->ssk_was_signed_by_master);
+    assert(peer_device->device_key_count > 0);
+    assert(peer_device->was_signed_by_ssk);
+
+    bool did_master_key = false;
+    bool did_device_key = false;
+    for(int i = 0; i < 2; i++) {
+        char * key_val = NULL;
+        if(!did_master_key) {
+            if(0 == strcmp(key_ids[i], user->master_keys[0].key_id)) {
+                did_master_key = true;
+                key_val = user->master_keys[0].key_value;
+            }
+        }
+        if(!did_device_key && !key_val) {
+            for(uint32_t j = 0; j < peer_device->device_key_count; j++) {
+                if(0 == strcmp(key_ids[i], peer_device->device_keys[j].key_id)) {
+                    did_device_key = true;
+                    key_val = peer_device->device_keys[j].key_value;
+                    break;
+                }
+            }
+        }
+        assert(key_val);
+
+        info_len = asprintf(&info,
+            "MATRIX_KEY_VERIFICATION_MAC%s%s%s%s%s%s",
+            t->user_id,
+            sas_device_id,
+            t->user_id,
+            t->device_id,
+            sas_txid,
+            key_ids[i]
+        );
+        assert(info_len > 0);
+
+        olm_mac_res = olm_sas_calculate_mac_fixed_base64(sas_olm_sas,
+                                            key_val, strlen(key_val),
+                                            info, info_len,
+                                            mac, mac_len);
+        assert(olm_mac_res == 0);
+
+        free(info);
+
+        assert(0 == strncmp(mac, key_macs[i], mac_len));
+    }
+
+    free(mac);
+
+    char * req_json_str;
+    assert(0 < asprintf(&req_json_str,
+        "{"
+            "\"messages\":{"
+                "\"%s\":{"
+                    "\"%s\":{"
+                        "\"transaction_id\":\"%s\""
+                    "}"
+                "}"
+            "}"
+        "}",
+        t->user_id,
+        sas_device_id,
+        sas_txid
+    ));
+
+    char path[SENDTODEVICE_PATH_SIZE("m.key.verification.done") + 1];
+    sprintf(path, SENDTODEVICE_PATH_FMT("m.key.verification.done"), txnid_next(t));
+
+    request(&t->https_conn[0], "PUT", path, t->auth_header, req_json_str, false);
+
+    free(req_json_str);
+}
+
 static void * thread(void * arg)
 {
     int res;
@@ -679,6 +1435,8 @@ static void * thread(void * arg)
 
     res = mkdir(t->upath, 0755);
     assert(res == 0 || errno == EEXIST);
+
+    txnid_init(t);
 
     t->rng_fd = open(BEEPER_RANDOM_PATH, O_RDONLY);
     assert(t->rng_fd != -1);
@@ -711,10 +1469,9 @@ static void * thread(void * arg)
     assert(login_json_str);
     cJSON_Delete(login_json);
 
-    char * resp_str = request(&t->https_conn[0], "POST", "login", NULL, login_json_str);
+    char * resp_str = request(&t->https_conn[0], "POST", "login", NULL, login_json_str, true);
     assert(resp_str);
     free(login_json_str);
-    // printf("%s\n", resp_str);
     cJSON * resp_json = unwrap_cjson(cJSON_Parse(resp_str));
     free(resp_str);
     {
@@ -739,7 +1496,6 @@ static void * thread(void * arg)
         else {
             int fd = open(device_id_path, O_WRONLY | O_EXCL | O_CREAT, 0644);
             assert(fd != -1);
-            free(device_id_path);
             ssize_t device_id_len = strlen(resp_device_id);
             ssize_t bw = write(fd, resp_device_id, device_id_len);
             assert(device_id_len == bw);
@@ -751,6 +1507,8 @@ static void * thread(void * arg)
         }
     }
     cJSON_Delete(resp_json);
+
+    free(device_id_path);
 
     t->olm_account = malloc(olm_account_size());
     assert(t->olm_account);
@@ -777,11 +1535,9 @@ static void * thread(void * arg)
         free(random_data);
     }
 
-    /* check whether we've uploaded our keys yet and whether our keys */
-    /* have been signed by the account's self signing key (device is verified). */
-    beeper_task_device_key_status_t device_key_status_res = device_key_status(t, &t->https_conn[0]);
-
-    if(device_key_status_res == BEEPER_TASK_DEVICE_KEY_STATUS_NOT_UPLOADED) {
+    char * identity_key_curve25519;
+    char * identity_key_ed25519;
+    {
         size_t identity_keys_length = olm_account_identity_keys_length(t->olm_account);
         char * identity_keys = malloc(identity_keys_length);
         assert(identity_keys);
@@ -790,6 +1546,21 @@ static void * thread(void * arg)
         cJSON * identity_keys_json = cJSON_ParseWithLength(identity_keys, identity_keys_length);
         free(identity_keys);
 
+        identity_key_curve25519 = strdup(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(identity_keys_json, "curve25519")));
+        assert(identity_key_curve25519);
+        identity_key_ed25519 = strdup(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(identity_keys_json, "ed25519")));
+        assert(identity_key_ed25519);
+
+        cJSON_Delete(identity_keys_json);
+    }
+
+    key_list_init(t);
+
+    /* check whether we've uploaded our keys yet and whether our keys */
+    /* have been signed by the account's self signing key (device is verified). */
+    beeper_task_device_key_status_t device_key_status_res = device_key_status(t);
+
+    if(device_key_status_res == BEEPER_TASK_DEVICE_KEY_STATUS_NOT_UPLOADED) {
         cJSON * one_time_keys_json = get_n_one_time_keys(t, ONE_TIME_KEY_COUNT_TARGET);
 
         size_t fallback_key_length = olm_account_unpublished_fallback_key_length(t->olm_account);
@@ -798,6 +1569,7 @@ static void * thread(void * arg)
         olm_res = olm_account_unpublished_fallback_key(t->olm_account, fallback_key, fallback_key_length);
         assert(olm_res == fallback_key_length);
         cJSON * fallback_key_json = cJSON_ParseWithLength(fallback_key, fallback_key_length);
+        free(fallback_key);
         if(cJSON_GetObjectItemCaseSensitive(fallback_key_json, "curve25519")->child == NULL) {
             cJSON_Delete(fallback_key_json);
 
@@ -808,14 +1580,14 @@ static void * thread(void * arg)
             free(random);
 
             fallback_key_length = olm_account_unpublished_fallback_key_length(t->olm_account);
-            fallback_key = realloc(fallback_key, fallback_key_length);
+            fallback_key = malloc(fallback_key_length);
             assert(fallback_key);
             olm_res = olm_account_unpublished_fallback_key(t->olm_account, fallback_key, fallback_key_length);
             assert(olm_res == fallback_key_length);
             fallback_key_json = cJSON_ParseWithLength(fallback_key, fallback_key_length);
+            free(fallback_key);
             assert(cJSON_GetObjectItemCaseSensitive(fallback_key_json, "curve25519")->child != NULL);
         }
-        free(fallback_key);
 
         cJSON * upload_keys_json = unwrap_cjson(cJSON_CreateObject());
         {
@@ -835,13 +1607,13 @@ static void * thread(void * arg)
             char * curve_device_key_id;
             assert(-1 != asprintf(&curve_device_key_id, "curve25519:%s", t->device_id));
             assert(cJSON_AddItemToObject(keys, curve_device_key_id, unwrap_cjson(cJSON_CreateStringReference(
-                cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(identity_keys_json, "curve25519"))))));
+                identity_key_curve25519))));
             free(curve_device_key_id);
 
             char * ed_device_key_id;
             assert(-1 != asprintf(&ed_device_key_id, "ed25519:%s", t->device_id));
             assert(cJSON_AddItemToObject(keys, ed_device_key_id, unwrap_cjson(cJSON_CreateStringReference(
-                cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(identity_keys_json, "ed25519"))))));
+                identity_key_ed25519))));
             free(ed_device_key_id);
 
             cJSON_AddItemToObjectCS(device_keys, "user_id", unwrap_cjson(cJSON_CreateStringReference(t->user_id)));
@@ -893,15 +1665,12 @@ static void * thread(void * arg)
         cJSON_Delete(upload_keys_json);
         cJSON_Delete(fallback_key_json);
         cJSON_Delete(one_time_keys_json);
-        cJSON_Delete(identity_keys_json);
 
         pickle_account(t);
 
-        resp_str = request(&t->https_conn[0], "POST", "keys/upload",
-                                  t->auth_header, upload_keys_json_str);
-        assert(resp_str);
+        request(&t->https_conn[0], "POST", "keys/upload",
+                                  t->auth_header, upload_keys_json_str, false);
         free(upload_keys_json_str);
-        free(resp_str);
 
         device_key_status_res = BEEPER_TASK_DEVICE_KEY_STATUS_NOT_VERIFIED;
     }
@@ -922,20 +1691,157 @@ static void * thread(void * arg)
     https_conn_init(&t->https_ctx, &t->https_conn[1]);
     request_send(&t->https_conn[1], "GET", "sync?timeout=30000", t->auth_header, NULL);
 
-    enum { SAS_STEP_REQUEST, SAS_STEP_START, SAS_STEP_KEY, SAS_STEP_IDK } sas_step = SAS_STEP_REQUEST;
+    enum { SAS_STEP_REQUEST, SAS_STEP_START, SAS_STEP_KEY,
+           SAS_STEP_MAC_NEED_MATCH_AND_MAC, SAS_STEP_MAC_NEED_MATCH, SAS_STEP_MAC_NEED_MAC,
+           SAS_STEP_DONE, SAS_STEP_END
+        } sas_step = SAS_STEP_REQUEST;
     char * sas_txid = NULL;
     char * sas_device_id = NULL;
     OlmSAS * sas_olm_sas = NULL;
+    cJSON * sas_peer_mac_content = NULL;
 
-    struct pollfd pfd[1] = {
-        // {.fd = queue_fd(), .events = POLLIN},
-        {.fd = https_fd(&t->https_conn[1])}
+    struct pollfd pfd[2] = {
+        {.fd = https_fd(&t->https_conn[1])},
+        {.fd = beeper_queue_get_poll_fd(&t->queue), .events = POLLIN}
     };
     while(1) {
+        beeper_task_queue_item_t queue_item;
+        assert(0 == pthread_mutex_lock(&t->queue_mutex));
+        bool queue_popped = beeper_queue_pop(&t->queue, &queue_item);
+        assert(0 == pthread_mutex_unlock(&t->queue_mutex));
+        if(queue_popped) {
+            beeper_task_received_event_t e = queue_item;
+            if(e == BEEPER_TASK_RECEIVED_EVENT_STOP) {
+                break;
+            }
+            else if(e == BEEPER_TASK_RECEIVED_EVENT_SAS_MATCHES) {
+                if(sas_step == SAS_STEP_MAC_NEED_MATCH_AND_MAC || sas_step == SAS_STEP_MAC_NEED_MATCH) {
+                    /* send our mac now that our device confirmed the match */
+                    char * info;
+                    int info_len = asprintf(&info,
+                        "MATRIX_KEY_VERIFICATION_MAC%s%s%s%s%sKEY_IDS",
+                        t->user_id,
+                        t->device_id,
+                        t->user_id,
+                        sas_device_id,
+                        sas_txid
+                    );
+                    assert(info_len > 0);
+
+                    char * device_key_ed25519_id;
+                    assert(0 < asprintf(&device_key_ed25519_id, "ed25519:%s", t->device_id));
+
+                    key_list_user_t * user;
+                    key_list_device_get(t, t->user_id, &user, t->device_id, NULL);
+                    assert(user->master_key_count == 1);
+
+                    char * first_key;
+                    char * second_key;
+                    if(strcmp(device_key_ed25519_id, user->master_keys[0].key_id) < 0) {
+                        first_key = device_key_ed25519_id;
+                        second_key = user->master_keys[0].key_id;
+                    } else {
+                        first_key = user->master_keys[0].key_id;
+                        second_key = device_key_ed25519_id;
+                    }
+
+                    char * key_list;
+                    int key_list_len = asprintf(&key_list, "%s,%s", first_key, second_key);
+                    assert(key_list_len > 0);
+
+                    size_t mac_len = olm_sas_mac_length(sas_olm_sas);
+                    char * macs = asserting_malloc(mac_len * 3);
+
+                    size_t olm_mac_res = olm_sas_calculate_mac_fixed_base64(sas_olm_sas,
+                                                               key_list, key_list_len,
+                                                               info, info_len,
+                                                               macs, mac_len);
+                    assert(olm_mac_res == 0);
+
+                    free(key_list);
+                    free(info);
+
+                    char * key_ids[2] = {device_key_ed25519_id, user->master_keys[0].key_id};
+                    char * key_vals[2] = {identity_key_ed25519, user->master_keys[0].key_value};
+                    for(int i = 0; i < 2; i++) {
+                        info_len = asprintf(&info,
+                            "MATRIX_KEY_VERIFICATION_MAC%s%s%s%s%s%s",
+                            t->user_id,
+                            t->device_id,
+                            t->user_id,
+                            sas_device_id,
+                            sas_txid,
+                            key_ids[i]
+                        );
+                        assert(info_len > 0);
+
+                        olm_mac_res = olm_sas_calculate_mac_fixed_base64(sas_olm_sas,
+                                                            key_vals[i], strlen(key_vals[i]),
+                                                            info, info_len,
+                                                            macs + (i+1) * mac_len, mac_len);
+                        assert(olm_mac_res == 0);
+
+                        free(info);
+                    }
+
+                    char * req_json_str;
+                    assert(0 < asprintf(&req_json_str,
+                        "{"
+                            "\"messages\":{"
+                                "\"%s\":{"
+                                    "\"%s\":{"
+                                        "\"keys\":\"%.*s\","
+                                        "\"mac\":{"
+                                            "\"%s\":\"%.*s\","
+                                            "\"%s\":\"%.*s\""
+                                        "},"
+                                        "\"transaction_id\":\"%s\""
+                                    "}"
+                                "}"
+                            "}"
+                        "}",
+                        t->user_id,
+                        sas_device_id,
+                        (int) mac_len, macs,
+                        key_ids[0], (int) mac_len, macs + mac_len,
+                        key_ids[1], (int) mac_len, macs + mac_len * 2,
+                        sas_txid
+                    ));
+
+                    free(macs);
+                    free(device_key_ed25519_id);
+
+                    char path[SENDTODEVICE_PATH_SIZE("m.key.verification.mac") + 1];
+                    sprintf(path, SENDTODEVICE_PATH_FMT("m.key.verification.mac"), txnid_next(t));
+
+                    request(&t->https_conn[0], "PUT", path, t->auth_header, req_json_str, false);
+
+                    free(req_json_str);
+
+                    if(sas_step == SAS_STEP_MAC_NEED_MATCH) {
+                        assert(sas_peer_mac_content);
+                        sas_process_peer_mac_and_send_done(
+                            t,
+                            sas_peer_mac_content,
+                            sas_olm_sas,
+                            sas_device_id,
+                            sas_txid
+                        );
+                        cJSON_Delete(sas_peer_mac_content);
+                        sas_peer_mac_content = NULL;
+                        sas_step = SAS_STEP_DONE;
+                    }
+                    else { /* sas_step == SAS_STEP_MAC_NEED_MATCH_AND_MAC */
+                        sas_step = SAS_STEP_MAC_NEED_MAC;
+                    }
+                }
+            }
+            else assert(0);
+
+            continue;
+        }
+
         bool something_happened = false;
-
-        // queue_dequeue();
-
         while(1) {
             int resp_len;
             int nonblocking_status;
@@ -948,7 +1854,8 @@ static void * thread(void * arg)
             }
             something_happened = true;
 
-            char * sync_path_with_since = NULL;
+            char * next_batch = NULL;
+            cJSON * device_lists = NULL;
 
             stream_data_t sd;
             stream_data_init(&sd, &t->https_conn[1], resp_len);
@@ -967,9 +1874,18 @@ static void * thread(void * arg)
                 object_key_string = json_get_string(&pdjson, NULL);
                 if(0 == strcmp("next_batch", object_key_string)) {
                     assert(json_next(&pdjson) == JSON_STRING);
-                    assert(-1 != asprintf(&sync_path_with_since, "sync?timeout=30000&since=%s",
-                                          json_get_string(&pdjson, NULL)));
-                    assert(sync_path_with_since);
+                    assert(!next_batch);
+                    next_batch = asserting_strdup(json_get_string(&pdjson, NULL));
+                }
+                else if(0 == strcmp("device_lists", object_key_string)) {
+                    assert(JSON_OBJECT == json_peek(&pdjson));
+                    stream_data_start_capture(&sd);
+                    start = json_get_position(&pdjson) - 1;
+                    assert(JSON_ERROR != json_skip(&pdjson));
+                    len = json_get_position(&pdjson) - start;
+                    capture = stream_data_get_capture(&sd, start, len);
+                    assert(!device_lists);
+                    device_lists = unwrap_cjson(cJSON_ParseWithLength(capture, len));
                 }
                 else if(0 == strcmp("to_device", object_key_string)) {
                     assert(JSON_OBJECT == json_next(&pdjson));
@@ -993,6 +1909,7 @@ static void * thread(void * arg)
                                 cJSON * content = unwrap_cjson(cJSON_GetObjectItemCaseSensitive(to_device_event, "content"));
                                 if(0 == strcmp(type, "m.key.verification.request")) {
                                     __label__ denied;
+                                    debug("m.key.verification.request");
                                     if(is_verified || sas_step != SAS_STEP_REQUEST || 0 != strcmp(sender, t->user_id)) goto denied;
                                     cJSON * methods = unwrap_cjson(cJSON_GetObjectItemCaseSensitive(content, "methods"));
                                     assert(cJSON_IsArray(methods));
@@ -1022,9 +1939,8 @@ static void * thread(void * arg)
                                     assert(transaction_id);
                                     char * from_device = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(content, "from_device"));
                                     assert(from_device);
-                                    assert(t->txid < ULLONG_MAX);
-                                    char * path;
-                                    assert(-1 != asprintf(&path, "sendToDevice/m.key.verification.ready/%llx", t->txid++));
+                                    char path[SENDTODEVICE_PATH_SIZE("m.key.verification.ready") + 1];
+                                    sprintf(path, SENDTODEVICE_PATH_FMT("m.key.verification.ready"), txnid_next(t));
                                     char * req_json_str;
                                     assert(-1 != asprintf(&req_json_str,
                                         "{"
@@ -1045,10 +1961,8 @@ static void * thread(void * arg)
                                         t->device_id,
                                         transaction_id
                                     ));
-                                    char * empty_resp = request(&t->https_conn[0], "PUT", path, t->auth_header, req_json_str);
-                                    free(empty_resp);
+                                    request(&t->https_conn[0], "PUT", path, t->auth_header, req_json_str, false);
                                     free(req_json_str);
-                                    free(path);
                                     sas_txid = strdup(transaction_id);
                                     assert(sas_txid);
                                     sas_device_id = strdup(from_device);
@@ -1058,6 +1972,7 @@ static void * thread(void * arg)
                                 }
                                 else if(0 == strcmp(type, "m.key.verification.start")) {
                                     __label__ denied;
+                                    debug("m.key.verification.start");
                                     if(sas_step != SAS_STEP_START || 0 != strcmp(sender, t->user_id)) goto denied;
                                     char * from_device = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(content, "from_device"));
                                     assert(from_device);
@@ -1125,9 +2040,10 @@ static void * thread(void * arg)
                                     free(olm_sha);
                                     free(commitment_content);
 
-                                    assert(t->txid < ULLONG_MAX);
-                                    char * path;
-                                    assert(-1 != asprintf(&path, "sendToDevice/m.key.verification.accept/%llx", t->txid++));
+                                    char path[MAX(SENDTODEVICE_PATH_SIZE("m.key.verification.accept"),
+                                                  SENDTODEVICE_PATH_SIZE("m.key.verification.key")) + 1];
+
+                                    sprintf(path, SENDTODEVICE_PATH_FMT("m.key.verification.accept"), txnid_next(t));
                                     char * req_json_str;
                                     assert(-1 != asprintf(&req_json_str,
                                         "{"
@@ -1150,14 +2066,11 @@ static void * thread(void * arg)
                                         (int) commitment_len, commitment,
                                         transaction_id
                                     ));
-                                    char * empty_resp = request(&t->https_conn[0], "PUT", path, t->auth_header, req_json_str);
-                                    free(empty_resp);
+                                    request(&t->https_conn[0], "PUT", path, t->auth_header, req_json_str, false);
                                     free(req_json_str);
-                                    free(path);
                                     free(commitment);
 
-                                    assert(t->txid < ULLONG_MAX);
-                                    assert(-1 != asprintf(&path, "sendToDevice/m.key.verification.key/%llx", t->txid++));
+                                    sprintf(path, SENDTODEVICE_PATH_FMT("m.key.verification.key"), txnid_next(t));
                                     assert(-1 != asprintf(&req_json_str,
                                         "{"
                                             "\"messages\":{"
@@ -1174,10 +2087,8 @@ static void * thread(void * arg)
                                         (int) pubkey_length, pubkey,
                                         transaction_id
                                     ));
-                                    empty_resp = request(&t->https_conn[0], "PUT", path, t->auth_header, req_json_str);
-                                    free(empty_resp);
+                                    request(&t->https_conn[0], "PUT", path, t->auth_header, req_json_str, false);
                                     free(req_json_str);
-                                    free(path);
                                     free(pubkey);
 
                                     sas_step = SAS_STEP_KEY;
@@ -1185,6 +2096,7 @@ static void * thread(void * arg)
                                 }
                                 else if(0 == strcmp(type, "m.key.verification.key")) {
                                     __label__ denied;
+                                    debug("m.key.verification.key");
                                     if(sas_step != SAS_STEP_KEY || 0 != strcmp(sender, t->user_id)) goto denied;
                                     char * transaction_id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(content, "transaction_id"));
                                     assert(transaction_id);
@@ -1233,7 +2145,43 @@ static void * thread(void * arg)
                                     }
                                     t->event_cb(BEEPER_TASK_EVENT_SAS_EMOJI, emoji_ids, t->event_cb_user_data);
 
-                                    sas_step = SAS_STEP_IDK;
+                                    sas_step = SAS_STEP_MAC_NEED_MATCH_AND_MAC;
+                                    denied:
+                                }
+                                else if(0 == strcmp(type, "m.key.verification.mac")) {
+                                    __label__ denied;
+                                    debug("m.key.verification.mac");
+                                    if((sas_step != SAS_STEP_MAC_NEED_MATCH_AND_MAC && sas_step != SAS_STEP_MAC_NEED_MAC)
+                                       || 0 != strcmp(sender, t->user_id)) goto denied;
+                                    char * transaction_id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(content, "transaction_id"));
+                                    assert(transaction_id);
+                                    if(0 != strcmp(transaction_id, sas_txid)) goto denied;
+                                    if(sas_step == SAS_STEP_MAC_NEED_MAC) {
+                                        sas_process_peer_mac_and_send_done(
+                                            t,
+                                            content,
+                                            sas_olm_sas,
+                                            sas_device_id,
+                                            sas_txid
+                                        );
+                                        sas_step = SAS_STEP_DONE;
+                                    }
+                                    else { /* sas_step == SAS_STEP_MAC_NEED_MATCH_AND_MAC */
+                                        assert(!sas_peer_mac_content);
+                                        sas_peer_mac_content = cJSON_DetachItemViaPointer(to_device_event, content);
+                                        sas_step = SAS_STEP_MAC_NEED_MATCH;
+                                    }
+                                    denied:
+                                }
+                                else if(0 == strcmp(type, "m.key.verification.done")) {
+                                    __label__ denied;
+                                    debug("m.key.verification.done");
+                                    if(sas_step != SAS_STEP_DONE || 0 != strcmp(sender, t->user_id)) goto denied;
+                                    char * transaction_id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(content, "transaction_id"));
+                                    assert(transaction_id);
+                                    if(0 != strcmp(transaction_id, sas_txid)) goto denied;
+                                    t->event_cb(BEEPER_TASK_EVENT_SAS_COMPLETE, NULL, t->event_cb_user_data);
+                                    sas_step = SAS_STEP_END;
                                     denied:
                                 }
                                 cJSON_Delete(to_device_event);
@@ -1249,24 +2197,40 @@ static void * thread(void * arg)
             json_close(&pdjson);
             stream_data_deinit(&sd);
 
+            if(key_list_should_save(t)) {
+                key_list_save(t);
+                assert(!key_list_should_save(t));
+            }
+
+            assert(next_batch);
+            char * sync_path_with_since;
+            assert(-1 != asprintf(&sync_path_with_since, "sync?timeout=30000&since=%s", next_batch));
             assert(sync_path_with_since);
             request_send(&t->https_conn[1], "GET", sync_path_with_since, t->auth_header, NULL);
             free(sync_path_with_since);
+
+            /* takes ownership of device_lists and next_batch */
+            key_list_apply_devicelists(t, device_lists, next_batch);
         }
 
         if(something_happened) {
             continue;
         }
 
-        res = poll(pfd, 1, -1);
+        res = poll(pfd, 2, -1);
         assert(res > 0);
     }
 
+    cJSON_Delete(sas_peer_mac_content);
     if(sas_olm_sas) olm_clear_sas(sas_olm_sas);
     free(sas_olm_sas);
     free(sas_device_id);
     free(sas_txid);
 
+    key_list_destroy(t);
+
+    free(identity_key_curve25519);
+    free(identity_key_ed25519);
     olm_clear_account(t->olm_account);
     free(t->olm_account);
     free(t->device_id);
@@ -1297,29 +2261,38 @@ beeper_task_t * beeper_task_create(const char * path, const char * username, con
     res = asprintf(&t->upath, "%s%s/", path, username);
     assert(res != -1);
 
-    // queue_init();
+    beeper_queue_init(&t->queue, sizeof(beeper_task_queue_item_t));
+    assert(0 == pthread_mutex_init(&t->queue_mutex, NULL));
 
-    pthread_attr_t thread_attr;
-    assert(0 == pthread_attr_init(&thread_attr));
-    assert(0 == pthread_attr_setstacksize(&thread_attr, 8192));
     assert(0 == pthread_create(&t->thread, NULL, thread, t));
-    assert(0 == pthread_attr_destroy(&thread_attr));
 
     return t;
 }
 
+static void safe_queue_push(beeper_task_t * t, beeper_task_received_event_t e)
+{
+    beeper_task_queue_item_t queue_item = e;
+    assert(0 == pthread_mutex_lock(&t->queue_mutex));
+    beeper_queue_push(&t->queue, &queue_item);
+    assert(0 == pthread_mutex_unlock(&t->queue_mutex));
+}
+
 void beeper_task_destroy(beeper_task_t * t)
 {
-    assert(0);
-
-    // queue_push("stop");
+    safe_queue_push(t, BEEPER_TASK_RECEIVED_EVENT_STOP);
 
     assert(0 == pthread_join(t->thread, NULL));
 
-    // queue_destroy();
+    assert(0 == pthread_mutex_destroy(&t->queue_mutex));
+    beeper_queue_destroy(&t->queue);
 
     free(t->upath);
     free(t->password);
     free(t->username);
     free(t);
+}
+
+void beeper_task_sas_matches(beeper_task_t * t)
+{
+    safe_queue_push(t, BEEPER_TASK_RECEIVED_EVENT_SAS_MATCHES);
 }
