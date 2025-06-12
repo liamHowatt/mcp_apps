@@ -1,5 +1,15 @@
 #include "beeper_ui_private.h"
 
+static void room_create(void * room_v)
+{
+    beeper_dict_item_memzero(room_v, sizeof(ui_room_t));
+}
+
+// static void room_destroy(void * room_v)
+// {
+//     ui_room_t * room = room_v;
+// }
+
 static void queue_poll_cb(int fd, uint32_t revents, void * user_data)
 {
     assert(revents == EPOLLIN);
@@ -33,6 +43,15 @@ static void queue_poll_cb(int fd, uint32_t revents, void * user_data)
             case BEEPER_TASK_EVENT_SAS_COMPLETE:
                 lv_subject_set_int(&c->verification_status_subject, BEEPER_UI_VERIFICATION_STATUS_VERIFIED);
                 break;
+            case BEEPER_TASK_EVENT_ROOM_TITLE: {
+                ui_room_t * room = beeper_dict_get_create(&c->room_dict, item.event_data, room_create, NULL);
+                if(!room->x_convo) {
+                    room->x_convo = texter_ui_convo_create(c->x);
+                }
+                texter_ui_convo_set_title(room->x_convo, item.event_data + (strlen(item.event_data) + 1));
+                free(item.event_data);
+                break;
+            }
             default:
                 free(item.event_data);
         }
@@ -56,6 +75,8 @@ static void base_obj_delete_cb(lv_event_t * e)
     free((void *) lv_subject_get_pointer(&c->sas_emoji_subject));
     lv_subject_deinit(&c->sas_emoji_subject);
 
+    beeper_dict_destroy(&c->room_dict, NULL);
+
     lv_obj_set_user_data(base_obj, NULL);
     free(c);
 }
@@ -71,6 +92,18 @@ void beeper_ui_base_obj_init(lv_obj_t * base_obj)
 
     lv_subject_init_int(&c->verification_status_subject, BEEPER_UI_VERIFICATION_STATUS_UNKNOWN);
     lv_subject_init_pointer(&c->sas_emoji_subject, NULL);
+
+    c->x_obj = lv_obj_create(base_obj);
+    lv_obj_remove_style_all(c->x_obj);
+    lv_obj_add_flag(c->x_obj, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_size(c->x_obj, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_opa(c->x_obj, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(c->x_obj, lv_color_white(), 0);
+
+    c->x = texter_ui_create(c->x_obj);
+    texter_ui_set_top_text(c->x, "Beeper");
+
+    beeper_array_init(&c->room_dict, sizeof(ui_room_t));
 
     lv_obj_set_user_data(base_obj, c);
     lv_obj_add_event_cb(base_obj, base_obj_delete_cb, LV_EVENT_DELETE, NULL);

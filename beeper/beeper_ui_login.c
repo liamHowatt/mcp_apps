@@ -46,12 +46,13 @@ static void kb_ready_cb(lv_event_t * e)
     res = mkdir(TASK_PATH, 0755);
     assert(res == 0 || errno == EEXIST);
 
-    lv_obj_t * base_obj = lv_obj_get_parent(kb);
+    lv_obj_t * bg_cont = lv_obj_get_parent(kb);
+    lv_obj_t * base_obj = lv_obj_get_parent(bg_cont);
     beeper_ui_t * c = lv_obj_get_user_data(base_obj);
 
     c->task = beeper_task_create(TASK_PATH, username, password, beeper_ui_task_event_cb, c);
 
-    lv_obj_clean(base_obj);
+    lv_obj_delete(bg_cont);
     beeper_ui_verify(base_obj);
 }
 
@@ -74,9 +75,6 @@ void beeper_ui_login(lv_obj_t * base_obj)
         return;
     }
 
-    lv_obj_remove_style_all(base_obj);
-    lv_obj_set_size(base_obj, LV_PCT(100), LV_PCT(100));
-
     lv_obj_t * bg_cont = lv_obj_create(base_obj);
     lv_obj_remove_style_all(bg_cont);
     lv_obj_set_size(bg_cont, LV_PCT(100), LV_PCT(100));
@@ -96,7 +94,7 @@ void beeper_ui_login(lv_obj_t * base_obj)
     lv_textarea_set_placeholder_text(password_ta, "password");
     lv_textarea_set_password_mode(password_ta, true);
 
-    lv_obj_t * kb = lv_keyboard_create(base_obj);
+    lv_obj_t * kb = lv_keyboard_create(bg_cont);
 
     lv_obj_add_event_cb(username_ta, ta_event_cb, LV_EVENT_FOCUSED, kb);
     lv_obj_add_event_cb(password_ta, ta_event_cb, LV_EVENT_FOCUSED, kb);

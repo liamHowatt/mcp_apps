@@ -150,9 +150,10 @@ static void observer_cb(lv_observer_t * observer, lv_subject_t * subject)
         lv_obj_set_width(spinner, LV_PCT(40));
     }
     else if(verification_status == BEEPER_UI_VERIFICATION_STATUS_VERIFIED) {
-        lv_obj_t * base_obj = lv_obj_get_parent(body);
-        lv_obj_clean(base_obj);
-        beeper_ui_networks(base_obj);
+        lv_obj_t * bg_cont = lv_obj_get_parent(body);
+        lv_obj_t * base_obj = lv_obj_get_parent(bg_cont);
+        lv_obj_delete(bg_cont);
+        beeper_ui_texter(base_obj);
     }
     else if(verification_status == BEEPER_UI_VERIFICATION_STATUS_NOT_VERIFIED) {
         lv_obj_clean(body);
@@ -184,9 +185,6 @@ static void observer_cb(lv_observer_t * observer, lv_subject_t * subject)
 void beeper_ui_verify(lv_obj_t * base_obj)
 {
     beeper_ui_t * c = lv_obj_get_user_data(base_obj);
-
-    lv_obj_remove_style_all(base_obj);
-    lv_obj_set_size(base_obj, LV_PCT(100), LV_PCT(100));
 
     lv_obj_t * bg_cont = lv_obj_create(base_obj);
     lv_obj_remove_style_all(bg_cont);

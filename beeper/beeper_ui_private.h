@@ -5,6 +5,12 @@
 #include "beeper_task.h"
 #include <pthread.h>
 #include <mcp/mcp_lvgl.h>
+#include <mcp/texter_ui.h>
+
+typedef struct {
+    char * room_id;
+    texter_ui_convo_t * x_convo;
+} ui_room_t;
 
 typedef struct {
     beeper_queue_t queue;
@@ -13,6 +19,10 @@ typedef struct {
     lv_subject_t verification_status_subject; /* int: beeper_ui_verification_status_t */
     lv_subject_t sas_emoji_subject;           /* pointer: array of 7 uint8_t: the 7 emoji ids, each with range [0-63] */
     beeper_task_t * task;
+
+    lv_obj_t * x_obj;
+    texter_ui_t * x;
+    beeper_array_t room_dict;
 } beeper_ui_t;
 
 typedef struct {
@@ -38,3 +48,6 @@ void beeper_ui_verify(lv_obj_t * base_obj);
 
 /* beeper_ui_networks.c */
 void beeper_ui_networks(lv_obj_t * base_obj);
+
+/* beeper_ui_texter.c */
+void beeper_ui_texter(lv_obj_t * base_obj);

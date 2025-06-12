@@ -8,6 +8,7 @@ typedef enum {
     BEEPER_TASK_EVENT_VERIFICATION_STATUS,   /* bool: sent once at startup */
     BEEPER_TASK_EVENT_SAS_EMOJI,             /* array of 7 uint8_t: the 7 emoji ids, each with range [0-63] */
     BEEPER_TASK_EVENT_SAS_COMPLETE,          /* NULL */
+    BEEPER_TASK_EVENT_ROOM_TITLE,            /* room_id\0title\0 */
 } beeper_task_event_t;
 
 typedef void (*beeper_task_event_cb_t)(beeper_task_event_t e, void * event_data, void * user_data);

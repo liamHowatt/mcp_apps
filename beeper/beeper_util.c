@@ -2,6 +2,34 @@
 
 #include <sys/eventfd.h>
 
+void * beeper_asserting_calloc(size_t nmemb, size_t size)
+{
+    void * ret = calloc(nmemb, size);
+    assert(ret);
+    return ret;
+}
+
+void * beeper_asserting_malloc(size_t size)
+{
+    void * ret = malloc(size);
+    assert(ret);
+    return ret;
+}
+
+void * beeper_asserting_realloc(void * ptr, size_t size)
+{
+    void * ret = realloc(ptr, size);
+    assert(ret);
+    return ret;
+}
+
+char * beeper_asserting_strdup(const char * s)
+{
+    char * new_s = strdup(s);
+    assert(new_s);
+    return new_s;
+}
+
 char * beeper_read_text_file(const char * path)
 {
     int fd = open(path, O_RDONLY);
@@ -52,11 +80,13 @@ void beeper_array_append(beeper_array_t * ba, const void * to_append)
 {
     if(ba->len == ba->cap) {
         if(ba->cap == 0) ba->cap = 2;
-        else ba->cap *= 2;
+        else ba->cap += ba->cap / 2;
         ba->data = realloc(ba->data, ba->cap * ba->item_size);
         assert(ba->data);
     }
-    memcpy(ba->data + ba->len * ba->item_size, to_append, ba->item_size);
+    if(to_append) {
+        memcpy(ba->data + ba->len * ba->item_size, to_append, ba->item_size);
+    }
     ba->len += 1;
 }
 
@@ -125,4 +155,47 @@ bool beeper_queue_pop(beeper_queue_t * bq, void * pop_dst)
 int beeper_queue_get_poll_fd(const beeper_queue_t * bq)
 {
     return bq->evfd;
+}
+
+void * beeper_dict_get_create(beeper_array_t * ba, const char * key,
+                              beeper_dict_cb_t create_cb, bool * was_created)
+{
+    size_t array_len = beeper_array_len(ba);
+    size_t item_size = ba->item_size;
+    uint8_t * p = beeper_array_data(ba);
+    for(size_t i = 0; i < array_len; i++) {
+        char * item_key = *(char **)p;
+        if(0 == strcmp(key, item_key)) {
+            if(was_created) *was_created = false;
+            return p;
+        }
+        p += item_size;
+    }
+    beeper_array_append(ba, NULL);
+    p = beeper_array_data(ba);
+    p += (array_len * item_size);
+    char * key_copy = strdup(key);
+    assert(key_copy);
+    *(char **)p = key_copy;
+    if(create_cb) create_cb(p);
+    if(was_created) *was_created = true;
+    return p;
+}
+
+void beeper_dict_destroy(beeper_array_t * ba, beeper_dict_cb_t destroy_cb)
+{
+    size_t array_len = beeper_array_len(ba);
+    size_t item_size = ba->item_size;
+    uint8_t * p = beeper_array_data(ba);
+    for(size_t i = 0; i < array_len; i++) {
+        if(destroy_cb) destroy_cb(p);
+        free(*(char **)p);
+        p += item_size;
+    }
+    beeper_array_destroy(ba);
+}
+
+void beeper_dict_item_memzero(void * item, size_t item_size)
+{
+    memset(item + sizeof(char *), 0, item_size - sizeof(char *));
 }
