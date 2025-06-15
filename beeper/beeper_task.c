@@ -2236,7 +2236,7 @@ static void * thread(void * arg)
                                 if(was_created) room_title_event_send(t, object_key_string, object_key_string);
                                 assert(JSON_OBJECT == json_next(&pdjson));
                                 while(while_object(&pdjson, &object_key_string)) {
-                                    if(0 == strcmp("state", object_key_string)) {
+                                    if(0 == strcmp("state", object_key_string) || 0 == strcmp("timeline", object_key_string)) {
                                         assert(json_next(&pdjson) == JSON_OBJECT);
                                         while(while_object(&pdjson, &object_key_string)) {
                                             if(0 == strcmp("events", object_key_string)) {
