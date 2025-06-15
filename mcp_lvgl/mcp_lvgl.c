@@ -5,16 +5,21 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <sys/stat.h>
-#include <poll.h>
 #include <nuttx/input/keyboard.h>
 #include <nuttx/input/touchscreen.h>
 #include <errno.h>
 
 #include <mcp/mcp_lvgl.h>
+#include <mcp/mcp_lvgl_common_private.h>
 #include <mcp/mcp_forth.h>
+#include <mcp/mcpd.h>
 #include <mcp/mcp_fs.h>
+
 #ifdef CONFIG_MCP_APPS_PEANUT_GB
 #include <mcp/peanut_gb.h>
+#endif
+#ifdef CONFIG_MCP_APPS_TEXTER_UI_DEMO
+#include <mcp/texter_ui.h>
 #endif
 
 #include <lvgl/lvgl.h>
@@ -22,7 +27,7 @@
 
 #include "runtime_lvgl.h"
 
-#define MQ_MSGSIZE 32
+#define MQ_MSGSIZE 64
 #define FORTH_DRIVER_MEMORY_SIZE 2048
 
 typedef void (*app_cb_t)(lv_obj_t * base_obj);
@@ -52,6 +57,27 @@ typedef struct {
     uint32_t key;
     lv_indev_state_t state;
 } keypad_data_t;
+
+typedef struct {
+    lv_indev_t * keypad_indev;
+    keypad_data_t keypad_data;
+} keypad_poll_data_t;
+
+typedef void (*mcp_lvgl_async_cb_t)(void * user_data);
+
+typedef struct {
+    mcpd_con_t con;
+    mcp_lvgl_async_cb_t cb;
+    void * user_data;
+    uint32_t cur_events;
+} mcp_lvgl_async_t;
+
+static const m4_runtime_cb_array_t runtime_lib_lvgl_common[] = {
+    {"mcp_lvgl_poll_add", {m4_f14, mcp_lvgl_poll_add}},
+    {"mcp_lvgl_poll_modify", {m4_f02, mcp_lvgl_poll_modify}},
+    {"mcp_lvgl_poll_remove", {m4_f01, mcp_lvgl_poll_remove}},
+    {NULL}
+};
 
 static mqd_t inner_open(int oflag)
 {
@@ -101,6 +127,11 @@ static void create_app_list(void)
     btn = lv_list_add_button(list, NULL, "Peanut GB");
     lv_group_remove_obj(btn);
     lv_obj_add_event_cb(btn, app_clicked_cb, LV_EVENT_CLICKED, peanut_gb_app_run);
+#endif
+#ifdef CONFIG_MCP_APPS_TEXTER_UI_DEMO
+    btn = lv_list_add_button(list, NULL, "Texter UI Demo");
+    lv_group_remove_obj(btn);
+    lv_obj_add_event_cb(btn, app_clicked_cb, LV_EVENT_CLICKED, texter_ui_demo_app_run);
 #endif
     for(int i = 0; i < ud->app_count; i++) {
         add_entry_to_app_list_obj(list, &ud->app_entries[i]);
@@ -152,6 +183,70 @@ static int mcp_lvgl_app_register(void * param, m4_stack_t * stack)
 
 static const m4_runtime_cb_array_t runtime_lib_lvgl_app[] = {
     {"mcp_lvgl_app_register", {mcp_lvgl_app_register}},
+    {NULL}
+};
+
+static void async_poll_cb(mcp_lvgl_poll_t * handle, int fd, uint32_t revents, void * user_data)
+{
+    mcp_lvgl_async_t * a = user_data;
+    assert(revents == a->cur_events);
+
+    int res = mcpd_async_continue(a->con);
+
+    if(res == MCPD_OK) {
+        mcp_lvgl_poll_remove(handle);
+        a->cb(a->user_data);
+        free(a);
+        return;
+    }
+
+    uint32_t events;
+    if(res == MCPD_ASYNC_WANT_WRITE) {
+        events = EPOLLOUT;
+    } else if(res == MCPD_ASYNC_WANT_READ) {
+        events = EPOLLIN;
+    } else assert(0);
+
+    if(events != a->cur_events) {
+        a->cur_events = events;
+        mcp_lvgl_poll_modify(handle, events);
+    }
+}
+
+static void mcp_lvgl_async_mcpd_inner(int mcpd_need, mcpd_con_t con,
+                                      mcp_lvgl_async_cb_t cb, void * user_data)
+{
+    uint32_t events;
+    if(mcpd_need == MCPD_ASYNC_WANT_WRITE) {
+        events = EPOLLOUT;
+    } else if(mcpd_need == MCPD_ASYNC_WANT_READ) {
+        events = EPOLLIN;
+    } else assert(0);
+    int fd = mcpd_get_async_polling_fd(con);
+    mcp_lvgl_async_t * a = malloc(sizeof(*a));
+    assert(a);
+    a->con = con;
+    a->cb = cb;
+    a->user_data = user_data;
+    a->cur_events = events;
+    mcp_lvgl_poll_add(fd, async_poll_cb, events, a);
+}
+
+static void mcp_lvgl_async_mcpd_write(mcpd_con_t con, const void * src, uint32_t len,
+                                      mcp_lvgl_async_cb_t cb, void * user_data)
+{
+    mcp_lvgl_async_mcpd_inner(mcpd_async_write_start(con, src, len), con, cb, user_data);
+}
+
+static void mcp_lvgl_async_mcpd_read(mcpd_con_t con, void * dst, uint32_t len,
+                                     mcp_lvgl_async_cb_t cb, void * user_data)
+{
+    mcp_lvgl_async_mcpd_inner(mcpd_async_read_start(con, dst, len), con, cb, user_data);
+}
+
+static const m4_runtime_cb_array_t runtime_lib_lvgl_async_mcpd[] = {
+    {"mcp_lvgl_async_mcpd_write", {m4_f05, mcp_lvgl_async_mcpd_write}},
+    {"mcp_lvgl_async_mcpd_read", {m4_f05, mcp_lvgl_async_mcpd_read}},
     {NULL}
 };
 
@@ -212,6 +307,8 @@ static void load_forth_driver(forth_driver_t * drv, const char * path)
         M4_RUNTIME_LIB_MCP_ALL_ENTRIES
         runtime_lib_lvgl,
         runtime_lib_lvgl_app,
+        runtime_lib_lvgl_common,
+        runtime_lib_lvgl_async_mcpd,
         NULL
     };
 
@@ -283,18 +380,91 @@ static void keypad_cb(lv_indev_t * indev, lv_indev_data_t * data)
     data->state = keypad_data->state;
 }
 
-static void add_driver(driver_ll_t ** drv_tail_p, const char * path)
+static void add_driver(driver_ll_t ** drv_head_p, const char * path)
 {
-    driver_ll_t * new_tail = malloc(sizeof(*new_tail));
-    assert(new_tail);
-    new_tail->next = NULL;
-    load_forth_driver(&new_tail->drv, path);
+    driver_ll_t * new_head = malloc(sizeof(*new_head));
+    assert(new_head);
+    new_head->next = *drv_head_p;
+    load_forth_driver(&new_head->drv, path);
+    *drv_head_p = new_head;
+}
 
-    driver_ll_t * drv_tail = *drv_tail_p;
-    if(drv_tail) {
-        drv_tail->next = new_tail;
+static void mq_poll_cb(mcp_lvgl_poll_t * handle, int fd, uint32_t revents, void * user_data)
+{
+    assert(revents == EPOLLIN);
+
+    ssize_t rwres;
+
+    mqd_t mq = fd;
+    driver_ll_t ** drv_head_p = user_data;
+
+    bool once = false;
+    char msg[MQ_MSGSIZE];
+    while (0 <= (rwres = mq_receive(mq, msg, MQ_MSGSIZE, NULL))) {
+        once = true;
+        assert(rwres > 0 && rwres <= MQ_MSGSIZE);
+        add_driver(drv_head_p, msg);
     }
-    *drv_tail_p = new_tail;
+    assert(errno == EAGAIN);
+    assert(once);
+}
+
+static void keypad_poll_cb(mcp_lvgl_poll_t * handle, int fd, uint32_t revents, void * user_data)
+{
+    assert(revents == EPOLLIN);
+
+    ssize_t rwres;
+
+    keypad_poll_data_t * d = user_data;
+
+    if(d->keypad_indev == NULL) {
+        d->keypad_indev = lv_indev_create();
+        lv_indev_set_type(d->keypad_indev, LV_INDEV_TYPE_KEYPAD);
+        lv_indev_set_read_cb(d->keypad_indev, keypad_cb);
+        lv_indev_set_group(d->keypad_indev, lv_group_get_default());
+        lv_indev_set_mode(d->keypad_indev, LV_INDEV_MODE_EVENT);
+        lv_indev_set_user_data(d->keypad_indev, &d->keypad_data);
+    }
+    bool once = false;
+    struct keyboard_event_s keypad_event;
+    while(sizeof(keypad_event) == (rwres = read(fd, &keypad_event, sizeof(keypad_event)))) {
+        once = true;
+        switch(keypad_event.code) {
+            case 103: /* KEY_UP */
+                d->keypad_data.key = LV_KEY_UP;
+                break;
+            case 108: /* KEY_DOWN */
+                d->keypad_data.key = LV_KEY_DOWN;
+                break;
+            case 105: /* KEY_LEFT */
+                d->keypad_data.key = LV_KEY_LEFT;
+                break;
+            case 106: /* KEY_RIGHT */
+                d->keypad_data.key = LV_KEY_RIGHT;
+                break;
+            case 1: /* KEY_ESC */
+                d->keypad_data.key = LV_KEY_ESC;
+                break;
+            case 28: /* KEY_ENTER */
+                d->keypad_data.key = LV_KEY_ENTER;
+                break;
+            default:
+                continue;
+        }
+        switch(keypad_event.type) {
+            case KEYBOARD_PRESS:
+                d->keypad_data.state = LV_INDEV_STATE_PRESSED;
+                break;
+            case KEYBOARD_RELEASE:
+                d->keypad_data.state = LV_INDEV_STATE_RELEASED;
+                break;
+            default:
+                continue;
+        }
+        lv_indev_read(d->keypad_indev);
+    }
+    assert(rwres < 0 && (errno == EAGAIN || errno == EWOULDBLOCK));
+    assert(once);
 }
 
 int mcp_lvgl_main(int argc, char *argv[])
@@ -304,7 +474,6 @@ int mcp_lvgl_main(int argc, char *argv[])
     lvgl_user_data_t lvgl_user_data = {0};
 
     driver_ll_t * drv_head = NULL;
-    driver_ll_t * drv_tail = NULL;
 
     mqd_t mq = inner_open(O_RDONLY | O_CREAT);
     char msg[MQ_MSGSIZE];
@@ -318,10 +487,10 @@ int mcp_lvgl_main(int argc, char *argv[])
             lvgl_is_init = true;
             lv_init();
             LV_GLOBAL_DEFAULT()->user_data = &lvgl_user_data;
+            mcp_lvgl_poll_init();
         }
 
-        add_driver(&drv_tail, msg);
-        if(!drv_head) drv_head = drv_tail;
+        add_driver(&drv_head, msg);
 
     } while(!lv_display_get_default());
 
@@ -330,91 +499,20 @@ int mcp_lvgl_main(int argc, char *argv[])
 
     create_app_list();
 
+    int flags = fcntl(mq, F_GETFL, 0);
+    assert(flags != -1);
+    assert(-1 != fcntl(mq, F_SETFL, flags | O_NONBLOCK));
+    mcp_lvgl_poll_add(mq, mq_poll_cb, EPOLLIN, &drv_head);
+
     int keypad_fd = open("/dev/ukeyboard", O_RDONLY | O_NONBLOCK);
     assert(keypad_fd >= 0);
+    keypad_poll_data_t keypad_poll_data;
+    keypad_poll_data.keypad_indev = NULL;
+    mcp_lvgl_poll_add(keypad_fd, keypad_poll_cb, EPOLLIN, &keypad_poll_data);
 
-    struct pollfd pfd[] = {
-        {.fd = mq,        .events = POLLIN},
-        {.fd = keypad_fd, .events = POLLIN}
-    };
+    mcp_lvgl_poll_run_until_done();
 
-    lv_indev_t * keypad_indev = NULL;
-    keypad_data_t keypad_data;
-
-    while (1) {
-        uint32_t time_til_next = lv_timer_handler();
-        int timeout = time_til_next == LV_NO_TIMER_READY ? -1 : time_til_next;
-        int event_count = poll(pfd, sizeof(pfd) / sizeof(*pfd), timeout);
-        assert(event_count >= 0);
-        if(!event_count) continue;
-
-        if(pfd[0].revents) {
-            assert(pfd[0].revents == POLLIN);
-
-            rwres = mq_receive(mq, msg, MQ_MSGSIZE, NULL);
-            assert(rwres > 0 && rwres <= MQ_MSGSIZE);
-            add_driver(&drv_tail, msg);
-
-            if(!(--event_count)) continue;
-        }
-
-        if(pfd[1].revents) {
-            assert(pfd[1].revents == POLLIN);
-
-            if(keypad_indev == NULL) {
-                keypad_indev = lv_indev_create();
-                lv_indev_set_type(keypad_indev, LV_INDEV_TYPE_KEYPAD);
-                lv_indev_set_read_cb(keypad_indev, keypad_cb);
-                lv_indev_set_group(keypad_indev, lv_group_get_default());
-                lv_indev_set_mode(keypad_indev, LV_INDEV_MODE_EVENT);
-                lv_indev_set_user_data(keypad_indev, &keypad_data);
-            }
-            bool once = false;
-            struct keyboard_event_s keypad_event;
-            while(sizeof(keypad_event) == (rwres = read(keypad_fd, &keypad_event, sizeof(keypad_event)))) {
-                once = true;
-                switch(keypad_event.code) {
-                    case 103: /* KEY_UP */
-                        keypad_data.key = LV_KEY_UP;
-                        break;
-                    case 108: /* KEY_DOWN */
-                        keypad_data.key = LV_KEY_DOWN;
-                        break;
-                    case 105: /* KEY_LEFT */
-                        keypad_data.key = LV_KEY_LEFT;
-                        break;
-                    case 106: /* KEY_RIGHT */
-                        keypad_data.key = LV_KEY_RIGHT;
-                        break;
-                    case 1: /* KEY_ESC */
-                        keypad_data.key = LV_KEY_ESC;
-                        break;
-                    case 28: /* KEY_ENTER */
-                        keypad_data.key = LV_KEY_ENTER;
-                        break;
-                    default:
-                        continue;
-                }
-                switch(keypad_event.type) {
-                    case KEYBOARD_PRESS:
-                        keypad_data.state = LV_INDEV_STATE_PRESSED;
-                        break;
-                    case KEYBOARD_RELEASE:
-                        keypad_data.state = LV_INDEV_STATE_RELEASED;
-                        break;
-                    default:
-                        continue;
-                }
-                lv_indev_read(keypad_indev);
-            }
-            assert(rwres < 0 && (errno == EAGAIN || errno == EWOULDBLOCK));
-            assert(once);
-
-            if(!(--event_count)) continue;
-        }
-
-    }
-
+    mcp_lvgl_poll_deinit();
     lv_deinit();
 
     do {

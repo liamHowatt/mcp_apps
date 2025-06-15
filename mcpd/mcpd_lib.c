@@ -14,6 +14,12 @@
 
 #include "mcpd_private.h"
 
+enum {
+    ASYNC_STATUS_OFF,
+    ASYNC_STATUS_WRITE,
+    ASYNC_STATUS_READ,
+};
+
 struct resource_path_ent_s {
     struct resource_path_ent_s * next;
     uint8_t resource_id;
@@ -23,7 +29,21 @@ struct resource_path_ent_s {
 struct mcpd_con_s {
     int con;
     struct resource_path_ent_s * resource_path_head;
+    uint8_t async_status;
+    uint8_t async_initial_write_data[5];
+    uint8_t async_initial_write_data_len;
+    uint8_t async_initial_write_data_pos;
+    union {const uint8_t * cp; uint8_t * p;} async_data;
+    uint32_t async_len;
 };
+
+static void fd_set_blocking(int fd, bool blocking)
+{
+    int flags = fcntl(fd, F_GETFL, 0);
+    assert(flags != -1);
+    flags = blocking ? (flags & ~O_NONBLOCK) : (flags | O_NONBLOCK);
+    assert(-1 != fcntl(fd, F_SETFL, flags));
+}
 
 int mcpd_connect(mcpd_con_t * con_dst, int peer_id)
 {
@@ -70,6 +90,7 @@ int mcpd_connect(mcpd_con_t * con_dst, int peer_id)
     assert(conp);
     conp->con = con;
     conp->resource_path_head = NULL;
+    conp->async_status = ASYNC_STATUS_OFF;
 
     *con_dst = conp;
     return MCPD_OK;
@@ -77,6 +98,8 @@ int mcpd_connect(mcpd_con_t * con_dst, int peer_id)
 
 void mcpd_disconnect(mcpd_con_t conp)
 {
+    assert(conp->async_status == ASYNC_STATUS_OFF);
+
     int res;
     ssize_t rwres;
 
@@ -106,6 +129,8 @@ void mcpd_disconnect(mcpd_con_t conp)
 
 void mcpd_write(mcpd_con_t conp, const void * data, uint32_t len)
 {
+    assert(conp->async_status == ASYNC_STATUS_OFF);
+
     ssize_t rwres;
 
     int con = conp->con;
@@ -126,6 +151,8 @@ void mcpd_write(mcpd_con_t conp, const void * data, uint32_t len)
 
 void mcpd_read(mcpd_con_t conp, void * data, uint32_t len)
 {
+    assert(conp->async_status == ASYNC_STATUS_OFF);
+
     ssize_t rwres;
 
     int con = conp->con;
@@ -146,8 +173,95 @@ void mcpd_read(mcpd_con_t conp, void * data, uint32_t len)
     assert(rwres == len);
 }
 
+int mcpd_async_write_start(mcpd_con_t conp, const void * data, uint32_t len)
+{
+    assert(conp->async_status == ASYNC_STATUS_OFF);
+
+    conp->async_status = ASYNC_STATUS_WRITE;
+    conp->async_initial_write_data[0] = OPERATION_WRITE;
+    memcpy(&conp->async_initial_write_data[1], &len, 4);
+    conp->async_initial_write_data_len = 5;
+    conp->async_initial_write_data_pos = 0;
+    conp->async_data.cp = data;
+    conp->async_len = len;
+
+    fd_set_blocking(conp->con, false);
+
+    return MCPD_ASYNC_WANT_WRITE;
+}
+
+int mcpd_async_read_start(mcpd_con_t conp, void * data, uint32_t len)
+{
+    assert(conp->async_status == ASYNC_STATUS_OFF);
+
+    conp->async_status = ASYNC_STATUS_READ;
+    conp->async_initial_write_data[0] = OPERATION_READ;
+    memcpy(&conp->async_initial_write_data[1], &len, 4);
+    conp->async_initial_write_data_len = 5;
+    conp->async_initial_write_data_pos = 0;
+    conp->async_data.p = data;
+    conp->async_len = len;
+
+    fd_set_blocking(conp->con, false);
+
+    return MCPD_ASYNC_WANT_WRITE;
+}
+
+int mcpd_async_continue(mcpd_con_t conp)
+{
+    assert(conp->async_status != ASYNC_STATUS_OFF);
+
+    ssize_t rwres;
+
+    while(conp->async_initial_write_data_len) {
+        rwres = write(
+            conp->con,
+            conp->async_initial_write_data + conp->async_initial_write_data_pos,
+            conp->async_initial_write_data_len
+        );
+        if(rwres < 0) {
+            assert(errno == EAGAIN || errno == EWOULDBLOCK);
+            return MCPD_ASYNC_WANT_WRITE;
+        }
+        conp->async_initial_write_data_len -= rwres;
+        conp->async_initial_write_data_pos += rwres;
+    }
+
+    while(conp->async_len) {
+        if(conp->async_status == ASYNC_STATUS_WRITE) {
+            rwres = write(conp->con, conp->async_data.cp, conp->async_len);
+            if(rwres < 0) {
+                assert(errno == EAGAIN || errno == EWOULDBLOCK);
+                return MCPD_ASYNC_WANT_WRITE;
+            }
+            conp->async_data.cp += rwres;
+        }
+        else {
+            rwres = read(conp->con, conp->async_data.p, conp->async_len);
+            if(rwres < 0) {
+                assert(errno == EAGAIN || errno == EWOULDBLOCK);
+                return MCPD_ASYNC_WANT_READ;
+            }
+            conp->async_data.p += rwres;
+        }
+        conp->async_len -= rwres;
+    }
+
+    conp->async_status = ASYNC_STATUS_OFF;
+    fd_set_blocking(conp->con, true);
+
+    return MCPD_OK;
+}
+
+int mcpd_get_async_polling_fd(mcpd_con_t conp)
+{
+    return conp->con;
+}
+
 int mcpd_gpio_acquire(mcpd_con_t conp, unsigned socketno, unsigned pinno)
 {
+    assert(conp->async_status == ASYNC_STATUS_OFF);
+
     ssize_t rwres;
 
     int con = conp->con;
@@ -166,6 +280,8 @@ int mcpd_gpio_acquire(mcpd_con_t conp, unsigned socketno, unsigned pinno)
 
 void mcpd_gpio_set(mcpd_con_t conp, unsigned gpio_id, bool en)
 {
+    assert(conp->async_status == ASYNC_STATUS_OFF);
+
     ssize_t rwres;
 
     int con = conp->con;
@@ -179,6 +295,8 @@ void mcpd_gpio_set(mcpd_con_t conp, unsigned gpio_id, bool en)
 int mcpd_resource_acquire(mcpd_con_t conp, mcpd_pins_periph_type_t periph_type,
     mcpd_pins_driver_type_t driver_type)
 {
+    assert(conp->async_status == ASYNC_STATUS_OFF);
+
     ssize_t rwres;
 
     int con = conp->con;
@@ -198,6 +316,8 @@ int mcpd_resource_acquire(mcpd_con_t conp, mcpd_pins_periph_type_t periph_type,
 int mcpd_resource_route(mcpd_con_t conp, unsigned resource_id, unsigned io_type,
     unsigned socketno, unsigned pinno)
 {
+    assert(conp->async_status == ASYNC_STATUS_OFF);
+
     ssize_t rwres;
 
     int con = conp->con;
@@ -215,6 +335,8 @@ int mcpd_resource_route(mcpd_con_t conp, unsigned resource_id, unsigned io_type,
 
 const char * mcpd_resource_get_path(mcpd_con_t conp, unsigned resource_id)
 {
+    assert(conp->async_status == ASYNC_STATUS_OFF);
+
     ssize_t rwres;
 
     int con = conp->con;
@@ -255,6 +377,8 @@ const char * mcpd_resource_get_path(mcpd_con_t conp, unsigned resource_id)
 
 int mcpd_file_hash(mcpd_con_t conp, const char * file_name, uint8_t * hash_32_byte_dst)
 {
+    assert(conp->async_status == ASYNC_STATUS_OFF);
+
     uint8_t byte;
 
     size_t file_name_len = strlen(file_name);

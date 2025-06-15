@@ -64,7 +64,7 @@ bool mcp_lvgl_poll_run(uint32_t timeout)
                 continue;
             }
             g->running_poll_i = i;
-            handle->cb(handle->fd, anded_events, handle->user_data);
+            handle->cb(handle, handle->fd, anded_events, handle->user_data);
         }
         g->running_poll_event_count = 0;
     }

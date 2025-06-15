@@ -76,6 +76,8 @@ const m4_runtime_cb_array_t m4_runtime_lib_mcpd[] = {
     {"mcpd_ioerror", {m4_lit, (void *) (MCPD_IOERROR)}},
     {"mcpd_noent", {m4_lit, (void *) (MCPD_NOENT)}},
     {"mcpd_nametoolong", {m4_lit, (void *) (MCPD_NAMETOOLONG)}},
+    {"mcpd_async_want_write", {m4_lit, (void *) (MCPD_ASYNC_WANT_WRITE)}},
+    {"mcpd_async_want_read", {m4_lit, (void *) (MCPD_ASYNC_WANT_READ)}},
     {"mcpd_con_null", {m4_lit, (void *) (MCPD_CON_NULL)}},
 
     {"mcpd_connect", {m4_f12, mcpd_connect}},
@@ -83,6 +85,11 @@ const m4_runtime_cb_array_t m4_runtime_lib_mcpd[] = {
 
     {"mcpd_write", {m4_f03, mcpd_write}},
     {"mcpd_read", {m4_f03, mcpd_read}},
+
+    {"mcpd_async_write_start", {m4_f13, mcpd_async_write_start}},
+    {"mcpd_async_read_start", {m4_f13, mcpd_async_read_start}},
+    {"mcpd_async_continue", {m4_f11, mcpd_async_continue}},
+    {"mcpd_get_async_polling_fd", {m4_f11, mcpd_get_async_polling_fd}},
 
     {"mcpd_gpio_acquire", {m4_f13, mcpd_gpio_acquire}},
     {"mcpd_gpio_set", {m4_f03, mcpd_gpio_set}},

@@ -10,7 +10,7 @@ static void room_create(void * room_v)
 //     ui_room_t * room = room_v;
 // }
 
-static void queue_poll_cb(int fd, uint32_t revents, void * user_data)
+static void queue_poll_cb(mcp_lvgl_poll_t * handle, int fd, uint32_t revents, void * user_data)
 {
     assert(revents == EPOLLIN);
 
