@@ -1,3 +1,5 @@
+#include <nuttx/config.h>
+
 #include <stdio.h>
 #include <string.h>
 #include <fcntl.h>
@@ -8,6 +10,7 @@
 #include <nuttx/input/keyboard.h>
 #include <nuttx/input/touchscreen.h>
 #include <errno.h>
+#include <pthread.h>
 
 #include <mcp/mcp_lvgl.h>
 #include <mcp/mcp_lvgl_common_private.h>
@@ -30,6 +33,12 @@
 #define MQ_MSGSIZE 64
 #define FORTH_DRIVER_MEMORY_SIZE 2048
 
+#define APP_BENCHMARK 1
+
+#if APP_BENCHMARK
+    #include <lvgl/demos/lv_demos.h>
+#endif
+
 typedef void (*app_cb_t)(lv_obj_t * base_obj);
 
 typedef struct {
@@ -41,6 +50,9 @@ typedef struct {
     int app_count;
     app_entry_t * app_entries;
     lv_obj_t * app_list_obj;
+#ifdef CONFIG_MCP_APPS_MCP_LVGL_STATIC_FB_STATIC
+    bool static_fb_is_held;
+#endif
 } lvgl_user_data_t;
 
 typedef struct {
@@ -72,12 +84,28 @@ typedef struct {
     uint32_t cur_events;
 } mcp_lvgl_async_t;
 
+#ifdef CONFIG_MCP_APPS_MCP_LVGL_STATIC_FB_STATIC
+static uint8_t static_fb[CONFIG_MCP_APPS_MCP_LVGL_STATIC_FB_SIZE] __attribute__((aligned(4)));
+#endif
+
+#if CONFIG_MCP_APPS_MCP_LVGL_STATIC_STACK_THREAD_STACKSIZE
+static uint8_t static_thread_stack[CONFIG_MCP_APPS_MCP_LVGL_STATIC_STACK_THREAD_STACKSIZE] __attribute__((aligned(16)));
+#endif
+
 static const m4_runtime_cb_array_t runtime_lib_lvgl_common[] = {
     {"mcp_lvgl_poll_add", {m4_f14, mcp_lvgl_poll_add}},
     {"mcp_lvgl_poll_modify", {m4_f02, mcp_lvgl_poll_modify}},
     {"mcp_lvgl_poll_remove", {m4_f01, mcp_lvgl_poll_remove}},
     {NULL}
 };
+
+#if APP_BENCHMARK
+static void benchmark_app_run(lv_obj_t * base_obj)
+{
+    lv_obj_add_flag(base_obj, LV_OBJ_FLAG_HIDDEN);
+    lv_demo_benchmark();
+}
+#endif
 
 static mqd_t inner_open(int oflag)
 {
@@ -111,6 +139,13 @@ void mcp_lvgl_queue_close(mcp_lvgl_queue_t mqd)
 static void app_clicked_cb(lv_event_t * e);
 static void add_entry_to_app_list_obj(lv_obj_t * list, const app_entry_t * entry);
 
+static void app_list_helper(lv_obj_t * list, const char * name, void (*app_cb)(lv_obj_t * base_obj))
+{
+    lv_obj_t * btn = lv_list_add_button(list, NULL, name);
+    lv_group_remove_obj(btn);
+    lv_obj_add_event_cb(btn, app_clicked_cb, LV_EVENT_CLICKED, app_cb);
+}
+
 static void create_app_list(void)
 {
     lvgl_user_data_t * ud = LV_GLOBAL_DEFAULT()->user_data;
@@ -121,17 +156,14 @@ static void create_app_list(void)
     lv_obj_set_size(list, LV_PCT(100), LV_PCT(100));
     lv_obj_set_style_radius(list, 0, 0);
     lv_obj_set_style_border_width(list, 0, 0);
-    lv_obj_t * btn;
-    (void)btn;
 #ifdef CONFIG_MCP_APPS_PEANUT_GB
-    btn = lv_list_add_button(list, NULL, "Peanut GB");
-    lv_group_remove_obj(btn);
-    lv_obj_add_event_cb(btn, app_clicked_cb, LV_EVENT_CLICKED, peanut_gb_app_run);
+    app_list_helper(list, "Peanut GB", peanut_gb_app_run);
 #endif
 #ifdef CONFIG_MCP_APPS_TEXTER_UI_DEMO
-    btn = lv_list_add_button(list, NULL, "Texter UI Demo");
-    lv_group_remove_obj(btn);
-    lv_obj_add_event_cb(btn, app_clicked_cb, LV_EVENT_CLICKED, texter_ui_demo_app_run);
+    app_list_helper(list, "Texter UI Demo", texter_ui_demo_app_run);
+#endif
+#if APP_BENCHMARK
+    app_list_helper(list, "LVGL Benchmark Demo", benchmark_app_run);
 #endif
     for(int i = 0; i < ud->app_count; i++) {
         add_entry_to_app_list_obj(list, &ud->app_entries[i]);
@@ -169,7 +201,7 @@ static int mcp_lvgl_app_register(void * param, m4_stack_t * stack)
 {
     if(!(stack->len >= 2)) return M4_STACK_UNDERFLOW_ERROR;
     lvgl_user_data_t * ud = LV_GLOBAL_DEFAULT()->user_data;
-    ud->app_entries = realloc(ud->app_entries, ++ud->app_count);
+    ud->app_entries = lv_realloc(ud->app_entries, ++ud->app_count);
     assert(ud->app_entries);
     ud->app_entries[ud->app_count - 1].name = (const char *) stack->data[-2];
     ud->app_entries[ud->app_count - 1].cb   = (app_cb_t)     stack->data[-1];
@@ -196,7 +228,7 @@ static void async_poll_cb(mcp_lvgl_poll_t * handle, int fd, uint32_t revents, vo
     if(res == MCPD_OK) {
         mcp_lvgl_poll_remove(handle);
         a->cb(a->user_data);
-        free(a);
+        lv_free(a);
         return;
     }
 
@@ -223,7 +255,7 @@ static void mcp_lvgl_async_mcpd_inner(int mcpd_need, mcpd_con_t con,
         events = EPOLLIN;
     } else assert(0);
     int fd = mcpd_get_async_polling_fd(con);
-    mcp_lvgl_async_t * a = malloc(sizeof(*a));
+    mcp_lvgl_async_t * a = lv_malloc(sizeof(*a));
     assert(a);
     a->con = con;
     a->cb = cb;
@@ -247,6 +279,41 @@ static void mcp_lvgl_async_mcpd_read(mcpd_con_t con, void * dst, uint32_t len,
 static const m4_runtime_cb_array_t runtime_lib_lvgl_async_mcpd[] = {
     {"mcp_lvgl_async_mcpd_write", {m4_f05, mcp_lvgl_async_mcpd_write}},
     {"mcp_lvgl_async_mcpd_read", {m4_f05, mcp_lvgl_async_mcpd_read}},
+    {NULL}
+};
+
+static uint8_t * mcp_lvgl_static_fb_acquire(uint32_t size_requirement)
+{
+#ifdef CONFIG_MCP_APPS_MCP_LVGL_STATIC_FB_STATIC
+    lvgl_user_data_t * ud = LV_GLOBAL_DEFAULT()->user_data;
+
+    if(!ud->static_fb_is_held && size_requirement <= CONFIG_MCP_APPS_MCP_LVGL_STATIC_FB_SIZE) {
+        ud->static_fb_is_held = true;
+        return static_fb;
+    }
+#endif
+
+    return malloc(size_requirement ? size_requirement : CONFIG_MCP_APPS_MCP_LVGL_STATIC_FB_SIZE);
+}
+
+static void mcp_lvgl_static_fb_release(uint8_t * fb)
+{
+#ifdef CONFIG_MCP_APPS_MCP_LVGL_STATIC_FB_STATIC
+    if(fb == static_fb) {
+        lvgl_user_data_t * ud = LV_GLOBAL_DEFAULT()->user_data;
+        assert(ud->static_fb_is_held);
+        ud->static_fb_is_held = false;
+        return;
+    }
+#endif
+
+    free(fb);
+}
+
+static const m4_runtime_cb_array_t runtime_lib_static_fb[] = {
+    {"mcp_lvgl_static_fb_acquire", {m4_f11, mcp_lvgl_static_fb_acquire}},
+    {"mcp_lvgl_static_fb_size", {m4_lit, (void *) CONFIG_MCP_APPS_MCP_LVGL_STATIC_FB_SIZE}},
+    {"mcp_lvgl_static_fb_release", {m4_f01, mcp_lvgl_static_fb_release}},
     {NULL}
 };
 
@@ -309,6 +376,7 @@ static void load_forth_driver(forth_driver_t * drv, const char * path)
         runtime_lib_lvgl_app,
         runtime_lib_lvgl_common,
         runtime_lib_lvgl_async_mcpd,
+        runtime_lib_static_fb,
         NULL
     };
 
@@ -382,7 +450,7 @@ static void keypad_cb(lv_indev_t * indev, lv_indev_data_t * data)
 
 static void add_driver(driver_ll_t ** drv_head_p, const char * path)
 {
-    driver_ll_t * new_head = malloc(sizeof(*new_head));
+    driver_ll_t * new_head = lv_malloc(sizeof(*new_head));
     assert(new_head);
     new_head->next = *drv_head_p;
     load_forth_driver(&new_head->drv, path);
@@ -467,7 +535,40 @@ static void keypad_poll_cb(mcp_lvgl_poll_t * handle, int fd, uint32_t revents, v
     assert(once);
 }
 
+#if CONFIG_MCP_APPS_MCP_LVGL_STATIC_STACK_THREAD_STACKSIZE
+static void * mcp_lvgl_thread(void * arg);
+
 int mcp_lvgl_main(int argc, char *argv[])
+{
+    int res;
+    pthread_t thread;
+    pthread_attr_t attr;
+
+    res = pthread_attr_init(&attr);
+    assert(res == 0);
+
+    res = pthread_attr_setstack(&attr, static_thread_stack, CONFIG_MCP_APPS_MCP_LVGL_STATIC_STACK_THREAD_STACKSIZE);
+    assert(res == 0);
+
+    res = pthread_attr_setinheritsched(&attr, PTHREAD_INHERIT_SCHED);
+    assert(res == 0);
+
+    res = pthread_create(&thread, &attr, mcp_lvgl_thread, NULL);
+    assert(res == 0);
+
+    res = pthread_attr_destroy(&attr);
+    assert(res == 0);
+
+    res = pthread_join(thread, NULL);
+    assert(res == 0);
+
+    return 0;
+}
+
+static void * mcp_lvgl_thread(void * arg)
+#else
+int mcp_lvgl_main(int argc, char *argv[])
+#endif
 {
     ssize_t rwres;
 
@@ -499,6 +600,12 @@ int mcp_lvgl_main(int argc, char *argv[])
 
     create_app_list();
 
+#ifdef CONFIG_LV_USE_SYSMON
+#ifdef CONFIG_LV_USE_PERF_MONITOR
+    lv_sysmon_hide_performance(NULL);
+#endif
+#endif
+
     int flags = fcntl(mq, F_GETFL, 0);
     assert(flags != -1);
     assert(-1 != fcntl(mq, F_SETFL, flags | O_NONBLOCK));
@@ -518,18 +625,23 @@ int mcp_lvgl_main(int argc, char *argv[])
     do {
         unload_forth_driver(&drv_head->drv);
         driver_ll_t * next = drv_head->next;
-        free(drv_head);
+        lv_free(drv_head);
         drv_head = next;
     } while(drv_head);
 
-    free(lvgl_user_data.app_entries);
+    lv_free(lvgl_user_data.app_entries);
 
-    m4_vm_engine_global_cleanup();
+    m4_global_cleanup();
 
     assert(0 == close(keypad_fd));
 
     mcp_lvgl_queue_close(mq);
 
     puts("mcp_lvgl exited");
+
+#if CONFIG_MCP_APPS_MCP_LVGL_STATIC_STACK_THREAD_STACKSIZE
+    return NULL;
+#else
     return 0;
+#endif
 }

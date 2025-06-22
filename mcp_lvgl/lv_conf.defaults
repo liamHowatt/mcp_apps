@@ -4,7 +4,8 @@ LV_FS_DEFAULT_DRIVER_LETTER       'A'
 LV_FS_POSIX_LETTER                'A'
 LV_FS_POSIX_PATH                  "/"
 LV_LOG_PRINTF                     1
-LV_USE_STDLIB_MALLOC              LV_STDLIB_CLIB
+LV_USE_STDLIB_MALLOC              LV_STDLIB_BUILTIN
+LV_MEM_SIZE                       (108 * 1024U)
 LV_USE_STDLIB_STRING              LV_STDLIB_CLIB
 LV_USE_STDLIB_SPRINTF             LV_STDLIB_CLIB
 LV_USE_FILE_EXPLORER              1
@@ -13,3 +14,24 @@ LV_USE_FS_POSIX                   1
 LV_USE_GRIDNAV                    1
 LV_USE_LOG                        1
 LV_USE_THEME_MONO                 1
+LV_USE_DEMO_WIDGETS               1
+LV_USE_DEMO_BENCHMARK             1
+LV_USE_SYSMON                     1
+LV_USE_PERF_MONITOR               1
+LV_FONT_MONTSERRAT_8              1
+LV_FONT_MONTSERRAT_10             1
+LV_FONT_MONTSERRAT_12             1
+LV_FONT_MONTSERRAT_14             1
+LV_FONT_MONTSERRAT_16             1
+LV_FONT_MONTSERRAT_18             1
+LV_FONT_MONTSERRAT_20             1
+LV_FONT_MONTSERRAT_22             1
+LV_FONT_MONTSERRAT_24             1
+LV_FONT_MONTSERRAT_26             1
+LV_FONT_MONTSERRAT_28             1
+LV_FONT_MONTSERRAT_30             1
+LV_FONT_MONTSERRAT_32             1
+LV_FONT_MONTSERRAT_34             1
+LV_FONT_MONTSERRAT_36             1
+LV_FONT_MONTSERRAT_38             1
+LV_FONT_MONTSERRAT_40             1

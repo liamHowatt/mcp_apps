@@ -5,7 +5,7 @@
 #include <time.h>
 #include <assert.h>
 
-#include <lvgl/lvgl.h> /* LV_NO_TIMER_READY, lv_timer_handler */
+#include <lvgl/lvgl.h>
 
 struct mcp_lvgl_poll_t {
     mcp_lvgl_poll_cb_t cb;
@@ -30,7 +30,7 @@ static ctx_t * g;
 
 void mcp_lvgl_poll_init(void)
 {
-    g = calloc(1, sizeof(*g));
+    g = lv_calloc(1, sizeof(*g));
     assert(g);
     g->ep_fd = epoll_create1(EPOLL_CLOEXEC);
     assert(g->ep_fd >= 0);
@@ -43,8 +43,8 @@ bool mcp_lvgl_poll_run(uint32_t timeout)
     if(g->n_polls) {
         if(g->n_polls > g->ep_eventlist_capacity) {
             g->ep_eventlist_capacity = g->n_polls;
-            free(g->ep_eventlist);
-            g->ep_eventlist = malloc(g->n_polls * sizeof(*g->ep_eventlist));
+            lv_free(g->ep_eventlist);
+            g->ep_eventlist = lv_malloc(g->n_polls * sizeof(*g->ep_eventlist));
             assert(g->ep_eventlist);
         }
 
@@ -80,7 +80,7 @@ bool mcp_lvgl_poll_run(uint32_t timeout)
     }
 
     if(!g->n_polls && g->ep_eventlist_capacity) {
-        free(g->ep_eventlist);
+        lv_free(g->ep_eventlist);
         g->ep_eventlist = NULL;
         g->ep_eventlist_capacity = 0;
     }
@@ -98,20 +98,20 @@ void mcp_lvgl_poll_deinit(void)
     int res = close(g->ep_fd);
     assert(res == 0);
 
-    free(g->ep_eventlist);
+    lv_free(g->ep_eventlist);
 
     while(g->head) {
         mcp_lvgl_poll_t * node = g->head;
         g->head = node->next;
-        free(node);
+        lv_free(node);
     }
 
-    free(g);
+    lv_free(g);
 }
 
 mcp_lvgl_poll_t * mcp_lvgl_poll_add(int fd, mcp_lvgl_poll_cb_t cb, uint32_t events, void * user_data)
 {
-    mcp_lvgl_poll_t * handle = malloc(sizeof(*handle));
+    mcp_lvgl_poll_t * handle = lv_malloc(sizeof(*handle));
     assert(handle);
     handle->cb = cb;
     handle->fd = fd;
@@ -170,7 +170,7 @@ void mcp_lvgl_poll_remove(mcp_lvgl_poll_t * handle)
         handle->next->prev = handle->prev;
     }
 
-    free(handle);
+    lv_free(handle);
 
     g->n_polls --;
 }

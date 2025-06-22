@@ -27,4 +27,24 @@ config MCP_APPS_MCP_LVGL_STACKSIZE
         int "MCP LVGL stack size"
         default 32768
 
+config MCP_APPS_MCP_LVGL_STATIC_FB_STATIC
+        bool "the static framebuffer is really static"
+        default n
+
+config MCP_APPS_MCP_LVGL_STATIC_FB_SIZE
+        int "static framebuffer size"
+        default 153600
+        ---help---
+                if MCP_APPS_MCP_LVGL_STATIC_FB_STATIC is disabled,
+                this value will still be used as the default
+                size of dynamically allocated framebuffers
+
+config MCP_APPS_MCP_LVGL_STATIC_STACK_THREAD_STACKSIZE
+        int "Use statically allocated stack memory for LVGL"
+        default 0
+        ---help---
+                Set to 0 to disable.
+                You will want to reduce MCP_APPS_MCP_LVGL_STACKSIZE
+                if this option is enabled.
+
 endif
