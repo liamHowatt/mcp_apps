@@ -371,6 +371,7 @@ static void load_forth_driver(forth_driver_t * drv, const char * path)
         m4_runtime_lib_string,
         m4_runtime_lib_time,
         m4_runtime_lib_assert,
+        m4_runtime_lib_threadutil,
         M4_RUNTIME_LIB_MCP_ALL_ENTRIES
         runtime_lib_lvgl,
         runtime_lib_lvgl_app,

@@ -18,6 +18,7 @@ CSRCS += mcp_forth/runtime_io.c
 CSRCS += mcp_forth/runtime_string.c
 CSRCS += mcp_forth/runtime_time.c
 CSRCS += mcp_forth/runtime_assert.c
+CSRCS += mcp_forth/runtime_threadutil.c
 CSRCS += bindings/runtime_mcpd.c
 CSRCS += bindings/runtime_spi.c
 CSRCS += bindings/runtime_input.c
