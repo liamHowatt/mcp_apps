@@ -6,11 +6,21 @@
 config MCP_APPS_MCP_FORTH
         tristate "MCP Forth App"
         default n
-        depends on SCHED_THREAD_LOCAL
+        depends on FS_NAMED_SEMAPHORES && FS_TMPFS
         ---help---
                 Enable the MCP Forth App
 
 if MCP_APPS_MCP_FORTH
+
+choice MCP_APPS_MCP_FORTH_NATIVE
+        prompt "Native machine code emitter to use"
+        default MCP_APPS_MCP_FORTH_NATIVE_NONE
+
+        config MCP_APPS_MCP_FORTH_NATIVE_NONE
+                bool "bytecode VM only"
+        config MCP_APPS_MCP_FORTH_NATIVE_X86_32
+                bool "x86-32"
+endchoice
 
 config MCP_APPS_MCP_FORTH_PROGNAME
         string "Program name"
