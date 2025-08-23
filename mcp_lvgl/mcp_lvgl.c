@@ -358,7 +358,7 @@ static void load_forth_driver(forth_driver_t * drv, const char * path)
     assert(res == 0);
 
     int error_near;
-    int bin_len = m4_compile(code_buf, buf_len, &drv->bin,
+    int bin_len = m4_compile(code_buf, buf_len, &drv->bin, NULL,
         &m4_compact_bytecode_vm_backend, &error_near);
     free(code_buf);
     if(bin_len < 0) {
@@ -384,7 +384,7 @@ static void load_forth_driver(forth_driver_t * drv, const char * path)
     const char * missing_word;
     res = m4_vm_engine_run(
         drv->bin,
-        bin_len,
+        NULL,
         drv->memory,
         FORTH_DRIVER_MEMORY_SIZE,
         cbs,

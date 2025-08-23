@@ -10,16 +10,26 @@
 #include <sys/stat.h>
 #include <semaphore.h>
 #include <dlfcn.h>
+#include <errno.h>
+#include <sys/boardctl.h>
+#include <sys/mount.h>
 
 #ifdef CONFIG_MCP_APPS_MCP_FS
     #include <mcp/mcp_fs.h>
 #endif
+
+#define STRINGIFY_(x) #x
+#define STRINGIFY(x) STRINGIFY_(x)
 
 #define HAVE_NATIVE
 #if defined(CONFIG_MCP_APPS_MCP_FORTH_NATIVE_X86_32)
     #define NATIVE_ARCH     M4_ARCH_X86_32
     #define NATIVE_BACKEND  m4_x86_32_backend
     #define NATIVE_RUN_FUNC m4_x86_32_engine_run
+#elif defined(CONFIG_MCP_APPS_MCP_FORTH_NATIVE_ESP32S3)
+    #define NATIVE_ARCH     M4_ARCH_ESP32S3
+    #define NATIVE_BACKEND  m4_esp32s3_backend
+    #define NATIVE_RUN_FUNC m4_esp32s3_engine_run
 #else
     #undef HAVE_NATIVE
 #endif
@@ -35,12 +45,7 @@
 
 static void show_usage(void)
 {
-    fprintf(stderr, "usage: mcp_forth [-O] <file path>\n");
-}
-
-static bool is_native_flag(const char * arg)
-{
-    return arg[0] == '-' && arg[1] == 'O';
+    fprintf(stderr, "usage: mcp_forth [-m] [-O] <file path>\n");
 }
 
 int main(int argc, char *argv[])
@@ -49,34 +54,54 @@ int main(int argc, char *argv[])
     ssize_t rwres;
 
     int fd;
+    struct stat st;
 
     char * path;
+    bool mount_samples = false;
     bool native = false;
-    if(argc == 2) {
-        if(is_native_flag(argv[1])) {
-            show_usage();
-            return 1;
-        }
-        path = argv[1];
-    }
-    else if(argc == 3) {
-        native = true;
-        if(is_native_flag(argv[1])) {
-            path = argv[2];
-        }
-        else if(is_native_flag(argv[2])) {
-            path = argv[1];
-        }
+    int opt;
+    while((opt = getopt(argc, argv, "mO")) >= 0) {
+        if(opt == 'm') mount_samples = true;
+        else if(opt == 'O') native = true;
         else {
             show_usage();
             return 1;
         }
     }
-    else {
-        show_usage();
-        return 1;
+    (void)mount_samples; /* suppress unused warnings */
+    (void)native;
+
+#ifdef CONFIG_MCP_APPS_MCP_FORTH_SAMPLES_ROMFS
+    if(mount_samples) {
+        res = stat("/forth_programs", &st);
+        if(res < 0) {
+            assert(errno == ENOENT);
+            extern const unsigned char m4_samples_romfs_img[];
+            extern unsigned int m4_samples_romfs_img_len;
+            assert(m4_samples_romfs_img_len % 512 == 0);
+            struct boardioc_romdisk_s romdisk_dsc = {
+                .minor = CONFIG_MCP_APPS_MCP_FORTH_SAMPLES_ROMFS_MINOR_NO,
+                .nsectors = m4_samples_romfs_img_len / 512,
+                .sectsize = 512,
+                .image = (uint8_t *)m4_samples_romfs_img
+            };
+            res = boardctl(BOARDIOC_ROMDISK, (uintptr_t) &romdisk_dsc);
+            assert(res == 0);
+            res = mount("/dev/ram" STRINGIFY(CONFIG_MCP_APPS_MCP_FORTH_SAMPLES_ROMFS_MINOR_NO),
+                        "/forth_programs", "romfs", MS_RDONLY, NULL);
+            assert(res == 0);
+        }
     }
-    (void)native; /* suppress unused warning */
+#endif
+
+    if(optind >= argc) {
+        if(!mount_samples) {
+            show_usage();
+            return 1;
+        }
+        return 0;
+    }
+    path = argv[optind];
 
 #ifdef CONFIG_MCP_APPS_MCP_FS
     char * cachepath = mcp_fs_cache_file(path);
@@ -96,7 +121,6 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    struct stat st;
     res = fstat(fd, &st);
     assert(res == 0);
     ssize_t buf_len = st.st_size;
@@ -118,14 +142,16 @@ int main(int argc, char *argv[])
 #endif
 
     uint8_t * bin;
+    int code_offset;
     int error_near;
-    int bin_len = m4_compile(buf, buf_len, &bin,
+    int bin_len = m4_compile(buf, buf_len, &bin, &code_offset,
         backend, &error_near);
     free(buf);
     if(bin_len < 0) {
         fprintf(stderr, "m4_compile: error %d near %d\n", bin_len, error_near);
         return 1;
     }
+    uint8_t * code = NULL;
 
     m4_engine_run_t run_func = m4_vm_engine_run;
 #ifdef HAVE_NATIVE
@@ -164,7 +190,7 @@ int main(int argc, char *argv[])
         int elf_size = m4_elf_nuttx_size();
         void * elf = malloc(elf_size);
         assert(elf);
-        m4_elf_nuttx(elf, NATIVE_ARCH, bin_len);
+        m4_elf_nuttx(elf, NATIVE_ARCH, code_offset, bin_len - code_offset);
 
         snprintf(dl_path, sizeof(dl_path), DL_PATH DL_PREFIX "%u", ctr);
 
@@ -185,9 +211,10 @@ int main(int argc, char *argv[])
         dl_handle = dlopen(dl_path, RTLD_NOW | RTLD_LOCAL);
         assert(dl_handle);
 
-        m4_elf_content_t * elf_cont = dlsym(dl_handle, "cont");
-        assert(elf_cont);
-        bin = elf_cont->bin;
+        bin = dlsym(dl_handle, "cont");
+        assert(bin);
+        code = dlsym(dl_handle, "code");
+        assert(code);
     }
 #endif
 
@@ -205,7 +232,7 @@ int main(int argc, char *argv[])
     const char * missing_word;
     int engine_res = run_func(
         bin,
-        bin_len,
+        code,
         memory,
         MEMORY_SIZE,
         cbs,

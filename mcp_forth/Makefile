@@ -19,35 +19,66 @@ CSRCS += mcp_forth/compile.c
 CSRCS += mcp_forth/vm_backend.c
 CSRCS += mcp_forth/vm_engine.c
 
+samples_romfs_img.c: mcp_forth/forth_programs/
+	genromfs -d mcp_forth/forth_programs/ -x lvgl -f m4_samples_romfs.img
+	echo '#include <nuttx/config.h>' > samples_romfs_img.c
+	echo '#ifdef CONFIG_MCP_APPS_MCP_FORTH_SAMPLES_ROMFS' >> samples_romfs_img.c
+	echo -n 'const ' >> samples_romfs_img.c
+	xxd -i m4_samples_romfs.img >> samples_romfs_img.c
+	echo '#endif' >> samples_romfs_img.c
+	rm m4_samples_romfs.img
+
+CSRCS += samples_romfs_img.c
+
 ifneq ($(CONFIG_MCP_APPS_MCP_FORTH_NATIVE_NONE),y)
 	CSRCS += mcp_forth/elf_nuttx.c
 endif
 
 ifeq ($(CONFIG_MCP_APPS_MCP_FORTH_NATIVE_X86_32),y)
 
-mcp_forth/x86-32_backend.c: mcp_forth/x86-32_backend_generated.h
+mcp_forth/x86-32_backend.c: mcp_forth/x86_32_backend_generated.h
 
-mcp_forth/x86-32_backend_generated.c: mcp_forth/x86-32_backend_generated.phony
-mcp_forth/x86-32_backend_generated.h: mcp_forth/x86-32_backend_generated.phony
+mcp_forth/x86_32_backend_generated.c: mcp_forth/x86_32_backend_generated.phony
+mcp_forth/x86_32_backend_generated.h: mcp_forth/x86_32_backend_generated.phony
 
-mcp_forth/x86-32_backend_generated.phony: mcp_forth/x86_32_backend_generator.py mcp_forth/nasm.py
+mcp_forth/x86_32_backend_generated.phony: mcp_forth/x86_32_backend_generator.py mcp_forth/backend_generator.py
 	bash -c 'cd mcp_forth && python3 x86_32_backend_generator.py'
-	touch mcp_forth/x86-32_backend_generated.phony
+	touch mcp_forth/x86_32_backend_generated.phony
 
 mcp_forth/x86-32_engine_asm.o: mcp_forth/x86-32_engine_asm.s
 	nasm -felf32 -o mcp_forth/x86-32_engine_asm.o mcp_forth/x86-32_engine_asm.s
 
 clean::
-	$(call DELFILE, mcp_forth/x86-32_backend_generated.phony)
-	$(call DELFILE, mcp_forth/x86-32_backend_generated.c)
-	$(call DELFILE, mcp_forth/x86-32_backend_generated.h)
-
-distclean:: clean
+	$(call DELFILE, mcp_forth/x86_32_backend_generated.phony)
+	$(call DELFILE, mcp_forth/x86_32_backend_generated.c)
+	$(call DELFILE, mcp_forth/x86_32_backend_generated.h)
 
 CSRCS += mcp_forth/x86-32_backend.c
 CSRCS += mcp_forth/x86-32_engine.c
-CSRCS += mcp_forth/x86-32_backend_generated.c
+CSRCS += mcp_forth/x86_32_backend_generated.c
 EXTOBJS += mcp_forth/x86-32_engine_asm.o
+
+endif
+ifeq ($(CONFIG_MCP_APPS_MCP_FORTH_NATIVE_ESP32S3),y)
+
+mcp_forth/esp32s3_backend.c: mcp_forth/esp32s3_backend_generated.h
+
+mcp_forth/esp32s3_backend_generated.c: mcp_forth/esp32s3_backend_generated.phony
+mcp_forth/esp32s3_backend_generated.h: mcp_forth/esp32s3_backend_generated.phony
+
+mcp_forth/esp32s3_backend_generated.phony: mcp_forth/esp32s3_backend_generator.py mcp_forth/backend_generator.py mcp_forth/esp32s3.h
+	bash -c 'cd mcp_forth && python3 esp32s3_backend_generator.py'
+	touch mcp_forth/esp32s3_backend_generated.phony
+
+clean::
+	$(call DELFILE, mcp_forth/esp32s3_backend_generated.phony)
+	$(call DELFILE, mcp_forth/esp32s3_backend_generated.c)
+	$(call DELFILE, mcp_forth/esp32s3_backend_generated.h)
+
+CSRCS += mcp_forth/esp32s3_backend.c
+CSRCS += mcp_forth/esp32s3_engine.c
+CSRCS += mcp_forth/esp32s3_backend_generated.c
+ASRCS += mcp_forth/esp32s3_engine_asm.S
 
 endif
 
@@ -62,5 +93,10 @@ CSRCS += bindings/runtime_input.c
 CSRCS += bindings/runtime_mcp_lvgl.c
 CSRCS += bindings/runtime_unix.c
 CSRCS += bindings/runtime_malloc.c
+
+clean::
+	$(call DELFILE, m4_samples_romfs.img samples_romfs_img.c)
+
+distclean:: clean
 
 include $(APPDIR)/Application.mk

@@ -12,6 +12,17 @@ config MCP_APPS_MCP_FORTH
 
 if MCP_APPS_MCP_FORTH
 
+config MCP_APPS_MCP_FORTH_SAMPLES_ROMFS
+        bool "include sample programs romfs"
+        default n
+        depends on BUILD_FLAT && BOARDCTL_ROMDISK
+
+if MCP_APPS_MCP_FORTH_SAMPLES_ROMFS
+        config MCP_APPS_MCP_FORTH_SAMPLES_ROMFS_MINOR_NO
+                int "minor number of the romfs block device"
+                default 0
+endif
+
 choice MCP_APPS_MCP_FORTH_NATIVE
         prompt "Native machine code emitter to use"
         default MCP_APPS_MCP_FORTH_NATIVE_NONE
@@ -20,6 +31,8 @@ choice MCP_APPS_MCP_FORTH_NATIVE
                 bool "bytecode VM only"
         config MCP_APPS_MCP_FORTH_NATIVE_X86_32
                 bool "x86-32"
+        config MCP_APPS_MCP_FORTH_NATIVE_ESP32S3
+                bool "ESP32-S3"
 endchoice
 
 config MCP_APPS_MCP_FORTH_PROGNAME
