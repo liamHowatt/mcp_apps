@@ -7,9 +7,27 @@
 #include <mcp/mcp_lvgl.h>
 #include <mcp/texter_ui.h>
 
+typedef struct ui_message_t ui_message_t;
+struct ui_message_t {
+    beeper_ll_t link; /* shall be first */
+    texter_ui_future_t * fut;
+    beeper_rcstr_t * next_chunk_id;
+    char * message_id;
+    char * text;
+    texter_ui_member_t member;
+    uint64_t timestamp;
+};
+
 typedef struct {
+    beeper_ll_t link; /* shall be first */
     char * room_id;
     texter_ui_convo_t * x_convo;
+    beeper_ll_t msg_list;
+    ui_message_t * bubble_top;
+    ui_message_t * bubble_bottom;
+    beeper_rcstr_t * bubble_top_requested_chunk_id;
+    beeper_rcstr_t * bubble_bottom_requested_chunk_id;
+    bool msg_window_is_not_caught_up;
 } ui_room_t;
 
 typedef struct {
@@ -22,7 +40,7 @@ typedef struct {
 
     lv_obj_t * x_obj;
     texter_ui_t * x;
-    beeper_array_t room_dict;
+    beeper_ll_t room_list;
 } beeper_ui_t;
 
 typedef struct {

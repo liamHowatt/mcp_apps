@@ -20,6 +20,7 @@ typedef struct {
 
 typedef struct {
     WOLFSSL * wolfssl_ssl;
+    beeper_task_https_ctx_t * ctx;
     bool blocking;
 } beeper_task_https_conn_t;
 
@@ -29,11 +30,22 @@ typedef enum {
     BEEPER_TASK_DEVICE_KEY_STATUS_IS_VERIFIED
 } beeper_task_device_key_status_t;
 
-typedef uint8_t beeper_task_queue_item_t;
 typedef enum {
     BEEPER_TASK_RECEIVED_EVENT_STOP,
     BEEPER_TASK_RECEIVED_EVENT_SAS_MATCHES,
+    BEEPER_TASK_RECEIVED_EVENT_REQUEST_MESSAGES,
 } beeper_task_received_event_t;
+
+typedef struct {
+    char * room_id;
+    char * chunk_id;
+    beeper_task_direction_t direction;
+} beeper_received_message_request_t;
+
+typedef struct {
+    beeper_task_received_event_t event_code;
+    void * data;
+} beeper_task_queue_item_t;
 
 typedef struct {
     char * key_id;
@@ -67,6 +79,21 @@ typedef struct {
 } key_list_init_t_;
 
 typedef enum {
+    MATRIX_EVENT_TYPE_NULL,
+    MATRIX_EVENT_TYPE_M_ROOM_MEMBER,
+    MATRIX_EVENT_TYPE_M_ROOM_CANONICAL_ALIAS,
+    MATRIX_EVENT_TYPE_M_ROOM_NAME,
+    MATRIX_EVENT_TYPE_M_ROOM_MESSAGE,
+} matrix_event_type_t;
+
+typedef enum {
+    MATRIX_JOINED_ROOM_NULL,
+    MATRIX_JOINED_ROOM_TIMELINE,
+    MATRIX_JOINED_ROOM_STATE,
+} matrix_joined_room_t;
+
+typedef enum {
+    ROOM_NAME_TYPE_NULL,
     ROOM_NAME_TYPE_MEMBERS,
     ROOM_NAME_TYPE_CANONICAL_ALIAS,
     ROOM_NAME_TYPE_NAME,
@@ -145,6 +172,7 @@ typedef struct {
 
 #define TXNID_INCREMNET 0x10000ull
 
+#define REQUEST_RETRY_COUNT 1
 #define HEADERS_ALLOC_CHUNK_SZ 1000
 #define DUMMY_BUF_SIZE 64
 #define OK_STATUS_START "HTTP/1.1 2"
@@ -347,11 +375,7 @@ static bool cjson_array_has_string(cJSON * array, const char * string)
 
 static void https_ctx_init(beeper_task_https_ctx_t * ctx)
 {
-    static bool wolfssl_is_init = false;
-    if (!wolfssl_is_init) {
-        wolfssl_is_init = true;
-        assert(wolfSSL_Init() == SSL_SUCCESS);
-    }
+    assert(wolfSSL_Init() == SSL_SUCCESS);
 
     ctx->wolfssl_ctx = wolfSSL_CTX_new(wolfTLSv1_2_client_method());
     assert(ctx->wolfssl_ctx);
@@ -377,6 +401,7 @@ static void https_ctx_deinit(beeper_task_https_ctx_t * ctx)
 
 static void https_conn_init(beeper_task_https_ctx_t * ctx, beeper_task_https_conn_t * conn)
 {
+    conn->ctx = ctx;
     conn->blocking = true;
 
     int fd = socket(ctx->peer->ai_family, ctx->peer->ai_socktype, ctx->peer->ai_protocol);
@@ -410,20 +435,35 @@ static void https_set_blocking(beeper_task_https_conn_t * conn, bool blocking)
 
 static void https_conn_deinit(beeper_task_https_conn_t * conn)
 {
+    int res;
     int fd = https_fd(conn);
     https_set_blocking(conn, true);
-    assert(SSL_SUCCESS == wolfSSL_shutdown(conn->wolfssl_ssl));
+    res = wolfSSL_shutdown(conn->wolfssl_ssl);
+    assert(res == SSL_SUCCESS || res == SSL_SHUTDOWN_NOT_DONE);
     wolfSSL_free(conn->wolfssl_ssl);
     assert(0 == shutdown(fd, SHUT_RDWR));
     assert(0 == close(fd));
+}
+
+static bool read_all_wolfssl(WOLFSSL * wolfssl_ssl, void * dst, int sz, bool allow_failure)
+{
+    while(sz) {
+        int res = wolfSSL_read(wolfssl_ssl, dst, sz);
+        if(res <= 0) {
+            assert(allow_failure);
+            return false;
+        }
+        dst += res;
+        sz -= res;
+    }
+    return true;
 }
 
 static void dummy_read(WOLFSSL * wolfssl_ssl, int len)
 {
     for( ; len > 0; len -= DUMMY_BUF_SIZE) {
         uint8_t dummy_buf[DUMMY_BUF_SIZE];
-        int res = wolfSSL_read(wolfssl_ssl, dummy_buf, len < DUMMY_BUF_SIZE ? len : DUMMY_BUF_SIZE);
-        assert(res > 0);
+        read_all_wolfssl(wolfssl_ssl, dummy_buf, len < DUMMY_BUF_SIZE ? len : DUMMY_BUF_SIZE, false);
     }
 }
 
@@ -466,14 +506,12 @@ static int request_read_chunk_size(beeper_task_https_conn_t * conn)
 {
     int res;
     char chunk_head_buf[10];
-    res = wolfSSL_read(conn->wolfssl_ssl, chunk_head_buf, 3);
-    assert(res > 0);
+    read_all_wolfssl(conn->wolfssl_ssl, chunk_head_buf, 3, false);
     int chunk_head_len = 3;
     while(!(chunk_head_buf[chunk_head_len - 2] == '\r'
             && chunk_head_buf[chunk_head_len - 1] == '\n')) {
         assert(chunk_head_len != 10);
-        res = wolfSSL_read(conn->wolfssl_ssl, &chunk_head_buf[chunk_head_len], 1);
-        assert(res > 0);
+        read_all_wolfssl(conn->wolfssl_ssl, &chunk_head_buf[chunk_head_len], 1, false);
         chunk_head_len += 1;
     }
     chunk_head_buf[chunk_head_len - 2] = '\0'; /* C0FFEE\0\n */
@@ -490,9 +528,12 @@ static void request_skip_chunk_trailer(beeper_task_https_conn_t * conn)
 
 static bool request_recv(beeper_task_https_conn_t * conn, int * resp_len_out,
                          bool blocking, int * nonblocking_status_out,
-                         bool read_resp_now, char ** resp_out)
+                         bool read_resp_now, char ** resp_out,
+                         bool allow_failure, bool * failed_p)
 {
     int res;
+
+    if(failed_p) *failed_p = false;
 
     char first_byte;
     if(!blocking) {
@@ -500,9 +541,15 @@ static bool request_recv(beeper_task_https_conn_t * conn, int * resp_len_out,
         res = wolfSSL_read(conn->wolfssl_ssl, &first_byte, 1);
         if(res <= 0) {
             res = wolfSSL_get_error(conn->wolfssl_ssl, res);
-            assert(res == SSL_ERROR_WANT_READ || res == SSL_ERROR_WANT_WRITE);
-            *nonblocking_status_out = res;
-            return false;
+            if(res == SSL_ERROR_WANT_READ || res == SSL_ERROR_WANT_WRITE) {
+                *nonblocking_status_out = res;
+                return false;
+            }
+            if(allow_failure) {
+                if(failed_p) *failed_p = true;
+                return false;
+            }
+            assert(0);
         }
     }
 
@@ -516,8 +563,13 @@ static bool request_recv(beeper_task_https_conn_t * conn, int * resp_len_out,
         head[0] = first_byte;
         head_len = 1;
     }
-    res = wolfSSL_read(conn->wolfssl_ssl, &head[head_len], 4 - head_len);
-    assert(res > 0);
+    bool read_succeeded = read_all_wolfssl(conn->wolfssl_ssl, &head[head_len], 4 - head_len, true);
+    if(!read_succeeded) {
+        assert(allow_failure);
+        if(failed_p) *failed_p = true;
+        free(head);
+        return false;
+    }
     head_len = 4;
     while(0 != memcmp(head + (head_len - 4), "\r\n\r\n", 4)) {
         if(head_len == head_cap) {
@@ -525,8 +577,7 @@ static bool request_recv(beeper_task_https_conn_t * conn, int * resp_len_out,
             head = realloc(head, head_cap);
             assert(head);
         }
-        res = wolfSSL_read(conn->wolfssl_ssl, &head[head_len], 1);
-        assert(res > 0);
+        read_all_wolfssl(conn->wolfssl_ssl, &head[head_len], 1, false);
         head_len += 1;
     };
 
@@ -558,8 +609,7 @@ static bool request_recv(beeper_task_https_conn_t * conn, int * resp_len_out,
         if(content_len != -1) {
             if(resp_out) {
                 resp = beeper_asserting_malloc(content_len + 1);
-                res = wolfSSL_read(conn->wolfssl_ssl, resp, content_len);
-                assert(res > 0);
+                read_all_wolfssl(conn->wolfssl_ssl, resp, content_len, false);
             }
             else {
                 dummy_read(conn->wolfssl_ssl, content_len);
@@ -576,8 +626,7 @@ static bool request_recv(beeper_task_https_conn_t * conn, int * resp_len_out,
                 if(chunk_sz) {
                     if(resp_out) {
                         resp = beeper_asserting_realloc(resp, content_len + chunk_sz + 1);
-                        res = wolfSSL_read(conn->wolfssl_ssl, &resp[content_len], chunk_sz);
-                        assert(res > 0);
+                        read_all_wolfssl(conn->wolfssl_ssl, &resp[content_len], chunk_sz, false);
                     }
                     else {
                         dummy_read(conn->wolfssl_ssl, chunk_sz);
@@ -600,17 +649,28 @@ static bool request_recv(beeper_task_https_conn_t * conn, int * resp_len_out,
 static char * request(beeper_task_https_conn_t * conn, const char * method, const char * path,
                       const char * extra_headers, const char * json_str, bool save_response)
 {
-    request_send(conn, method, path, extra_headers, json_str);
-    char * resp = NULL;
-    request_recv(conn, NULL, true, NULL, true, save_response ? &resp : NULL);
-    return resp;
+    int tries_left = REQUEST_RETRY_COUNT;
+    while(1) {
+        request_send(conn, method, path, extra_headers, json_str);
+        char * resp = NULL;
+        bool read_succeeded = request_recv(conn, NULL, true, NULL, true, save_response ? &resp : NULL, true, NULL);
+        if(!read_succeeded) {
+            assert(tries_left);
+            debug("retrying request %d more time(s)", tries_left);
+            tries_left -= 1;
+            beeper_task_https_ctx_t * conn_ctx = conn->ctx;
+            https_conn_deinit(conn);
+            https_conn_init(conn_ctx, conn);
+            continue;
+        }
+        return resp;
+    }
 }
 
 static void request_recv_more(beeper_task_https_conn_t * conn, char * dst, int len)
 {
     https_set_blocking(conn, true);
-    int res = wolfSSL_read(conn->wolfssl_ssl, dst, len);
-    assert(res == len);
+    read_all_wolfssl(conn->wolfssl_ssl, dst, len, false);
 }
 
 static void recursively_sort_json_objects(cJSON * json)
@@ -626,9 +686,18 @@ static void recursively_sort_json_objects(cJSON * json)
 
 static char * canonical_json(cJSON * json)
 {
-    recursively_sort_json_objects(json);
-    char * stringified = cJSON_PrintUnformatted(json);
+    /* unfortunately we need to deep-copy the json until
+       https://github.com/DaveGamble/cJSON/pull/908 is merged.
+       Items cannot be added to an object/array after it's been sorted.
+     */
+    cJSON * json_copy = unwrap_cjson(cJSON_Duplicate(json, true));
+
+    recursively_sort_json_objects(json_copy);
+    char * stringified = cJSON_PrintUnformatted(json_copy);
     assert(stringified);
+
+    cJSON_Delete(json_copy);
+
     return stringified;
 }
 
@@ -1176,6 +1245,38 @@ static void room_destroy(void * room_v)
     beeper_dict_destroy(&room->members, room_member_destroy);
 }
 
+static void event_data_message_init_from_room_event(
+    beeper_task_t * t, beeper_task_event_data_message_t * el, cJSON * room_event)
+{
+    char * event_id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(room_event, "event_id"));
+    assert(event_id);
+    el->message_id = beeper_asserting_strdup(event_id);
+    char * body = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(room_event, "content"), "body"));
+    assert(body);
+    el->text = beeper_asserting_strdup(body);
+    char * sender = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(room_event, "sender"));
+    assert(sender);
+    el->member = 0 == strcmp(sender, t->user_id) ? BEEPER_TASK_MEMBER_YOU : BEEPER_TASK_MEMBER_THEM;
+    cJSON * origin_server_ts = cJSON_GetObjectItemCaseSensitive(room_event, "origin_server_ts");
+    assert(cJSON_IsNumber(origin_server_ts));
+    /* casting double to uint64_t */
+    el->timestamp = cJSON_GetNumberValue(origin_server_ts);
+}
+
+static void received_event_data_destroy(const beeper_task_queue_item_t * queue_item)
+{
+    switch(queue_item->event_code) {
+        case BEEPER_TASK_RECEIVED_EVENT_REQUEST_MESSAGES:
+            beeper_received_message_request_t * ev_data = queue_item->data;
+            free(ev_data->room_id);
+            free(ev_data->chunk_id);
+            free(ev_data);
+            break;
+        default:
+            break;
+    }
+}
+
 static void stream_data_init(
     stream_data_t * sd,
     beeper_task_https_conn_t * conn,
@@ -1706,17 +1807,12 @@ static void * thread(void * arg)
     }
 
     if(device_key_status_res == BEEPER_TASK_DEVICE_KEY_STATUS_NOT_VERIFIED) {
-        olm_res = olm_account_mark_keys_as_published(t->olm_account);
-        if(olm_res > 0) {
-            pickle_account(t);
-        }
+        olm_account_mark_keys_as_published(t->olm_account);
+        pickle_account(t);
     }
 
     bool is_verified = device_key_status_res == BEEPER_TASK_DEVICE_KEY_STATUS_IS_VERIFIED;
-    bool * is_verified_event_data = malloc(sizeof(bool));
-    assert(is_verified_event_data);
-    *is_verified_event_data = is_verified;
-    t->event_cb(BEEPER_TASK_EVENT_VERIFICATION_STATUS, is_verified_event_data, t->event_cb_user_data);
+    t->event_cb(BEEPER_TASK_EVENT_VERIFICATION_STATUS, (void *)(uintptr_t)is_verified, t->event_cb_user_data);
 
     https_conn_init(&t->https_ctx, &t->https_conn[1]);
     request_send(&t->https_conn[1], "GET", "sync?timeout=30000", t->auth_header, NULL);
@@ -1743,7 +1839,7 @@ static void * thread(void * arg)
         bool queue_popped = beeper_queue_pop(&t->queue, &queue_item);
         assert(0 == pthread_mutex_unlock(&t->queue_mutex));
         if(queue_popped) {
-            beeper_task_received_event_t e = queue_item;
+            beeper_task_received_event_t e = queue_item.event_code;
             if(e == BEEPER_TASK_RECEIVED_EVENT_STOP) {
                 break;
             }
@@ -1869,7 +1965,76 @@ static void * thread(void * arg)
                     }
                 }
             }
+            else if(e == BEEPER_TASK_RECEIVED_EVENT_REQUEST_MESSAGES) {
+                beeper_received_message_request_t * msgs_req_ev = queue_item.data;
+
+                char * path;
+                if(msgs_req_ev->chunk_id) {
+                    assert(0 < asprintf(&path,
+                        "rooms/%s/messages?dir=%c&from=%s",
+                        msgs_req_ev->room_id,
+                        msgs_req_ev->direction == BEEPER_TASK_DIRECTION_UP ? 'b' : 'f',
+                        msgs_req_ev->chunk_id
+                    ));
+                }
+                else {
+                    assert(0 < asprintf(&path,
+                        "rooms/%s/messages?dir=%c",
+                        msgs_req_ev->room_id,
+                        msgs_req_ev->direction == BEEPER_TASK_DIRECTION_UP ? 'b' : 'f'
+                    ));
+                }
+                char * msgs_resp = request(&t->https_conn[0], "GET", path, t->auth_header, NULL, true);
+                free(path);
+                cJSON * msgs_json = unwrap_cjson(cJSON_Parse(msgs_resp));
+                free(msgs_resp);
+
+                cJSON * chunk = unwrap_cjson(cJSON_GetObjectItemCaseSensitive(msgs_json, "chunk"));
+
+                uint32_t message_count = 0;
+                cJSON * chunk_item;
+                cJSON_ArrayForEach(chunk_item, chunk) {
+                    char * type = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(chunk_item, "type"));
+                    assert(type);
+                    if(0 == strcmp(type, "m.room.message")) {
+                        message_count += 1;
+                    }
+                }
+
+                beeper_task_messages_event_data_t * msgs_resp_event = beeper_asserting_calloc(1,
+                    sizeof(*msgs_resp_event) + message_count * sizeof(msgs_resp_event->messages[0]));
+                msgs_resp_event->room_id = msgs_req_ev->room_id; /* take ownership */
+                msgs_req_ev->room_id = NULL;
+                msgs_resp_event->this_chunk_id = msgs_req_ev->chunk_id; /* take ownership */
+                msgs_req_ev->chunk_id = NULL;
+                cJSON * next_chunk_id_json = cJSON_GetObjectItemCaseSensitive(msgs_json, "end");
+                if(next_chunk_id_json) {
+                    char * next_chunk_id = cJSON_GetStringValue(next_chunk_id_json);
+                    assert(next_chunk_id);
+                    msgs_resp_event->next_chunk_id = beeper_asserting_strdup(next_chunk_id);
+                }
+                msgs_resp_event->direction = msgs_req_ev->direction;
+                msgs_resp_event->message_count = message_count;
+
+                uint32_t i = 0;
+                cJSON_ArrayForEach(chunk_item, chunk) {
+                    char * type = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(chunk_item, "type"));
+                    if(0 != strcmp(type, "m.room.message")) {
+                        continue;
+                    }
+
+                    event_data_message_init_from_room_event(t, &msgs_resp_event->messages[i], chunk_item);
+
+                    i++;
+                }
+
+                cJSON_Delete(msgs_json);
+
+                t->event_cb(BEEPER_TASK_EVENT_ROOM_MESSAGES, msgs_resp_event, t->event_cb_user_data);
+            }
             else assert(0);
+
+            received_event_data_destroy(&queue_item);
 
             continue;
         }
@@ -1880,6 +2045,7 @@ static void * thread(void * arg)
             int nonblocking_status;
             bool response_was_received = request_recv(&t->https_conn[1], &resp_len,
                                                       false, &nonblocking_status,
+                                                      false, NULL,
                                                       false, NULL);
             if(!response_was_received) {
                 pfd[0].events = nonblocking_status == SSL_ERROR_WANT_READ ? POLLIN : POLLOUT;
@@ -2236,10 +2402,20 @@ static void * thread(void * arg)
                                 if(was_created) room_title_event_send(t, object_key_string, object_key_string);
                                 assert(JSON_OBJECT == json_next(&pdjson));
                                 while(while_object(&pdjson, &object_key_string)) {
-                                    if(0 == strcmp("state", object_key_string) || 0 == strcmp("timeline", object_key_string)) {
+                                    matrix_joined_room_t joined_room_obj_type = MATRIX_JOINED_ROOM_NULL;
+                                    if(0 == strcmp("timeline", object_key_string)) joined_room_obj_type = MATRIX_JOINED_ROOM_TIMELINE;
+                                    else if(0 == strcmp("state", object_key_string)) joined_room_obj_type = MATRIX_JOINED_ROOM_STATE;
+                                    if(joined_room_obj_type == MATRIX_JOINED_ROOM_TIMELINE || joined_room_obj_type == MATRIX_JOINED_ROOM_STATE) {
                                         assert(json_next(&pdjson) == JSON_OBJECT);
+                                        char * timeline_prev_batch = NULL;
+                                        beeper_task_messages_event_data_t * timeline_messages_event = NULL;
                                         while(while_object(&pdjson, &object_key_string)) {
-                                            if(0 == strcmp("events", object_key_string)) {
+                                            if(joined_room_obj_type == MATRIX_JOINED_ROOM_TIMELINE && 0 == strcmp("prev_batch", object_key_string)) {
+                                                assert(json_next(&pdjson) == JSON_STRING);
+                                                assert(timeline_prev_batch == NULL);
+                                                timeline_prev_batch = beeper_asserting_strdup(json_get_string(&pdjson, NULL));
+                                            }
+                                            else if(0 == strcmp("events", object_key_string)) {
                                                 assert(json_next(&pdjson) == JSON_ARRAY);
                                                 while(while_array(&pdjson, JSON_OBJECT)) {
                                                     stream_data_start_capture(&sd);
@@ -2248,31 +2424,36 @@ static void * thread(void * arg)
                                                         if(0 == strcmp("type", object_key_string)) {
                                                             assert(json_next(&pdjson) == JSON_STRING);
                                                             const char * type_string = json_get_string(&pdjson, NULL);
-                                                            bool should_capture = true;
-                                                            room_name_type_t room_event_type;
+                                                            matrix_event_type_t event_type = MATRIX_EVENT_TYPE_NULL;
+                                                            if(0 == strcmp("m.room.member", type_string)) event_type = MATRIX_EVENT_TYPE_M_ROOM_MEMBER;
+                                                            else if(0 == strcmp("m.room.canonical_alias", type_string)) event_type = MATRIX_EVENT_TYPE_M_ROOM_CANONICAL_ALIAS;
+                                                            else if(0 == strcmp("m.room.name", type_string)) event_type = MATRIX_EVENT_TYPE_M_ROOM_NAME;
+                                                            else if(0 == strcmp("m.room.message", type_string)) event_type = MATRIX_EVENT_TYPE_M_ROOM_MESSAGE;
+                                                            room_name_type_t room_event_name_type = ROOM_NAME_TYPE_NULL;
                                                             switch(room->name_type) {
                                                                 case ROOM_NAME_TYPE_MEMBERS:
-                                                                    if(0 == strcmp("m.room.member", type_string)) {
-                                                                        room_event_type = ROOM_NAME_TYPE_MEMBERS;
+                                                                    if(event_type == MATRIX_EVENT_TYPE_M_ROOM_MEMBER) {
+                                                                        room_event_name_type = ROOM_NAME_TYPE_MEMBERS;
                                                                         break;
                                                                     }
                                                                     /* fall through */
                                                                 case ROOM_NAME_TYPE_CANONICAL_ALIAS:
-                                                                    if(0 == strcmp("m.room.canonical_alias", type_string)) {
-                                                                        room_event_type = ROOM_NAME_TYPE_CANONICAL_ALIAS;
+                                                                    if(event_type == MATRIX_EVENT_TYPE_M_ROOM_CANONICAL_ALIAS) {
+                                                                        room_event_name_type = ROOM_NAME_TYPE_CANONICAL_ALIAS;
                                                                         break;
                                                                     }
                                                                     /* fall through */
                                                                 case ROOM_NAME_TYPE_NAME:
-                                                                    if(0 == strcmp("m.room.name", type_string)) {
-                                                                        room_event_type = ROOM_NAME_TYPE_NAME;
+                                                                    if(event_type == MATRIX_EVENT_TYPE_M_ROOM_NAME) {
+                                                                        room_event_name_type = ROOM_NAME_TYPE_NAME;
                                                                         break;
                                                                     }
                                                                     /* fall through */
                                                                 default:
-                                                                    should_capture = false;
                                                                     break;
                                                             }
+                                                            bool should_capture = room_event_name_type != ROOM_NAME_TYPE_NULL
+                                                                                  || event_type == MATRIX_EVENT_TYPE_M_ROOM_MESSAGE;
                                                             if(!should_capture) {
                                                                 sd.capturing = false;
                                                             }
@@ -2282,72 +2463,92 @@ static void * thread(void * arg)
                                                                 capture = stream_data_get_capture(&sd, start, len);
                                                                 debug("%.*s", len, capture);
                                                                 cJSON * room_event = unwrap_cjson(cJSON_ParseWithLength(capture, len));
-                                                                cJSON * content = unwrap_cjson(cJSON_GetObjectItemCaseSensitive(
-                                                                    room_event, "content"));
-                                                                bool non_member_name_ok = false;
-                                                                if(room_event_type == ROOM_NAME_TYPE_MEMBERS) {
-                                                                    char * membership = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(
-                                                                        content, "membership"));
-                                                                    assert(membership);
-                                                                    if(0 == strcmp("join", membership)) {
-                                                                        char * user_id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(
-                                                                            room_event, "state_key"));
-                                                                        assert(user_id);
-                                                                        char * display_name = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(
-                                                                            content, "displayname"));
-                                                                        room_member_t * room_member = beeper_dict_get_create(&room->members, user_id, room_member_create, &was_created);
-                                                                        bool display_name_unchanged = !was_created && ((display_name == NULL && room_member->display_name == NULL)
-                                                                                                                    || (display_name && room_member->display_name && 0 == strcmp(display_name, room_member->display_name)));
-                                                                        if(!display_name_unchanged) {
-                                                                            free(room_member->display_name);
-                                                                            room_member->display_name = display_name ? beeper_asserting_strdup(display_name) : NULL;
+                                                                if(room_event_name_type != ROOM_NAME_TYPE_NULL) {
+                                                                    cJSON * content = unwrap_cjson(cJSON_GetObjectItemCaseSensitive(
+                                                                        room_event, "content"));
+                                                                    bool non_member_name_ok = false;
+                                                                    if(room_event_name_type == ROOM_NAME_TYPE_MEMBERS) {
+                                                                        char * membership = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(
+                                                                            content, "membership"));
+                                                                        assert(membership);
+                                                                        if(0 == strcmp("join", membership)) {
+                                                                            char * user_id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(
+                                                                                room_event, "state_key"));
+                                                                            assert(user_id);
+                                                                            char * display_name = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(
+                                                                                content, "displayname"));
+                                                                            room_member_t * room_member = beeper_dict_get_create(&room->members, user_id, room_member_create, &was_created);
+                                                                            bool display_name_unchanged = !was_created && ((display_name == NULL && room_member->display_name == NULL)
+                                                                                                                        || (display_name && room_member->display_name && 0 == strcmp(display_name, room_member->display_name)));
+                                                                            if(!display_name_unchanged) {
+                                                                                free(room_member->display_name);
+                                                                                room_member->display_name = display_name ? beeper_asserting_strdup(display_name) : NULL;
 
-                                                                            size_t room_member_count = beeper_array_len(&room->members);
-                                                                            room_member_t * room_members = beeper_array_data(&room->members);
-                                                                            size_t title_size = (room_member_count - 1) * 2 + 1;
-                                                                            for(size_t i = 0; i < room_member_count; i++)
-                                                                                title_size += strlen(room_members[i].display_name ? room_members[i].display_name : room_members[i].user_id);
-                                                                            char * title = beeper_asserting_malloc(title_size);
-                                                                            char * title_p = title;
-                                                                            for(size_t i = 0; i < room_member_count; i++) {
-                                                                                char * part = room_members[i].display_name ? room_members[i].display_name : room_members[i].user_id;
-                                                                                title_p = stpcpy(title_p, part);
-                                                                                if(i + 1 < room_member_count) {
-                                                                                    title_p[0] = ',';
-                                                                                    title_p[1] = ' ';
-                                                                                    title_p += 2;
+                                                                                size_t room_member_count = beeper_array_len(&room->members);
+                                                                                room_member_t * room_members = beeper_array_data(&room->members);
+                                                                                size_t title_size = (room_member_count - 1) * 2 + 1;
+                                                                                for(size_t i = 0; i < room_member_count; i++)
+                                                                                    title_size += strlen(room_members[i].display_name ? room_members[i].display_name : room_members[i].user_id);
+                                                                                char * title = beeper_asserting_malloc(title_size);
+                                                                                char * title_p = title;
+                                                                                for(size_t i = 0; i < room_member_count; i++) {
+                                                                                    char * part = room_members[i].display_name ? room_members[i].display_name : room_members[i].user_id;
+                                                                                    title_p = stpcpy(title_p, part);
+                                                                                    if(i + 1 < room_member_count) {
+                                                                                        title_p[0] = ',';
+                                                                                        title_p[1] = ' ';
+                                                                                        title_p += 2;
+                                                                                    }
                                                                                 }
+                                                                                room_title_event_send(t, room->room_id, title);
+                                                                                free(title);
                                                                             }
-                                                                            room_title_event_send(t, room->room_id, title);
-                                                                            free(title);
                                                                         }
                                                                     }
-                                                                }
-                                                                else if(room_event_type == ROOM_NAME_TYPE_CANONICAL_ALIAS) {
-                                                                    char * alias = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(
-                                                                        content, "alias"));
-                                                                    if(alias && alias[0]) {
-                                                                        free(room->name);
-                                                                        room->name = beeper_asserting_strdup(alias);
-                                                                        non_member_name_ok = true;
+                                                                    else if(room_event_name_type == ROOM_NAME_TYPE_CANONICAL_ALIAS) {
+                                                                        char * alias = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(
+                                                                            content, "alias"));
+                                                                        if(alias && alias[0]) {
+                                                                            free(room->name);
+                                                                            room->name = beeper_asserting_strdup(alias);
+                                                                            non_member_name_ok = true;
+                                                                        }
+                                                                    }
+                                                                    else if(room_event_name_type == ROOM_NAME_TYPE_NAME) {
+                                                                        char * name = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(
+                                                                            content, "name"));
+                                                                        if(name && name[0]) {
+                                                                            free(room->name);
+                                                                            room->name = beeper_asserting_strdup(name);
+                                                                            non_member_name_ok = true;
+                                                                        }
+                                                                    }
+                                                                    else assert(0);
+                                                                    if(room_event_name_type > ROOM_NAME_TYPE_MEMBERS && non_member_name_ok) {
+                                                                        room_title_event_send(t, room->room_id, room->name);
+                                                                        beeper_dict_reset(&room->members, room_member_destroy);
+                                                                        room->name_type = room_event_name_type;
                                                                     }
                                                                 }
-                                                                else if(room_event_type == ROOM_NAME_TYPE_NAME) {
-                                                                    char * name = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(
-                                                                        content, "name"));
-                                                                    if(name && name[0]) {
-                                                                        free(room->name);
-                                                                        room->name = beeper_asserting_strdup(name);
-                                                                        non_member_name_ok = true;
+                                                                if(event_type == MATRIX_EVENT_TYPE_M_ROOM_MESSAGE) {
+                                                                    if(timeline_messages_event == NULL) {
+                                                                        timeline_messages_event = beeper_asserting_calloc(1, sizeof(*timeline_messages_event)
+                                                                                                                             + 1 * sizeof(timeline_messages_event->messages[0]));
+                                                                        timeline_messages_event->room_id = beeper_asserting_strdup(room->room_id);
+                                                                        timeline_messages_event->direction = BEEPER_TASK_DIRECTION_DOWN;
+                                                                        timeline_messages_event->message_count = 1;
                                                                     }
+                                                                    else {
+                                                                        timeline_messages_event->message_count += 1;
+                                                                        timeline_messages_event = beeper_asserting_realloc(timeline_messages_event,
+                                                                                                                           sizeof(*timeline_messages_event)
+                                                                                                                           + timeline_messages_event->message_count
+                                                                                                                           * sizeof(timeline_messages_event->messages[0]));
+                                                                    }
+                                                                    beeper_task_event_data_message_t * message_element = &timeline_messages_event->messages[timeline_messages_event->message_count - 1];
+                                                                    event_data_message_init_from_room_event(t, message_element, room_event);
                                                                 }
-                                                                else assert(0);
                                                                 cJSON_Delete(room_event);
-                                                                if(room_event_type > ROOM_NAME_TYPE_MEMBERS && non_member_name_ok) {
-                                                                    room_title_event_send(t, room->room_id, room->name);
-                                                                    beeper_array_reset(&room->members);
-                                                                    room->name_type = room_event_type;
-                                                                }
                                                             }
                                                             break;
                                                         }
@@ -2358,6 +2559,12 @@ static void * thread(void * arg)
                                             }
                                             else assert(JSON_ERROR != json_skip(&pdjson));
                                         }
+                                        if(timeline_messages_event) {
+                                            timeline_messages_event->next_chunk_id = timeline_prev_batch; /* take ownership */
+                                            timeline_prev_batch = NULL;
+                                            t->event_cb(BEEPER_TASK_EVENT_ROOM_MESSAGES, timeline_messages_event, t->event_cb_user_data);
+                                        }
+                                        free(timeline_prev_batch);
                                     }
                                     else assert(JSON_ERROR != json_skip(&pdjson));
                                 }
@@ -2386,7 +2593,7 @@ static void * thread(void * arg)
             assert(next_batch);
             char * sync_path_with_since;
             assert(-1 != asprintf(&sync_path_with_since, "sync?timeout=30000&since=%s", next_batch));
-            assert(sync_path_with_since);
+            free(next_batch);
             request_send(&t->https_conn[1], "GET", sync_path_with_since, t->auth_header, NULL);
             free(sync_path_with_since);
         }
@@ -2449,9 +2656,9 @@ beeper_task_t * beeper_task_create(const char * path, const char * username, con
     return t;
 }
 
-static void safe_queue_push(beeper_task_t * t, beeper_task_received_event_t e)
+static void safe_queue_push(beeper_task_t * t, beeper_task_received_event_t e, void * data)
 {
-    beeper_task_queue_item_t queue_item = e;
+    beeper_task_queue_item_t queue_item = {.event_code = e, .data = data};
     assert(0 == pthread_mutex_lock(&t->queue_mutex));
     beeper_queue_push(&t->queue, &queue_item);
     assert(0 == pthread_mutex_unlock(&t->queue_mutex));
@@ -2459,11 +2666,13 @@ static void safe_queue_push(beeper_task_t * t, beeper_task_received_event_t e)
 
 void beeper_task_destroy(beeper_task_t * t)
 {
-    safe_queue_push(t, BEEPER_TASK_RECEIVED_EVENT_STOP);
+    safe_queue_push(t, BEEPER_TASK_RECEIVED_EVENT_STOP, NULL);
 
     assert(0 == pthread_join(t->thread, NULL));
 
     assert(0 == pthread_mutex_destroy(&t->queue_mutex));
+    beeper_task_queue_item_t queue_item;
+    while(beeper_queue_pop(&t->queue, &queue_item)) received_event_data_destroy(&queue_item);
     beeper_queue_destroy(&t->queue);
 
     free(t->upath);
@@ -2472,7 +2681,51 @@ void beeper_task_destroy(beeper_task_t * t)
     free(t);
 }
 
+void beeper_task_event_data_destroy(beeper_task_event_t e, void * event_data)
+{
+    switch(e) {
+        case BEEPER_TASK_EVENT_VERIFICATION_STATUS:
+            break;
+        case BEEPER_TASK_EVENT_ROOM_MESSAGES: {
+            beeper_task_messages_event_data_t * msgs = event_data;
+            free(msgs->room_id);
+            free(msgs->this_chunk_id);
+            free(msgs->next_chunk_id);
+            for(uint32_t i = 0; i < msgs->message_count; i++) {
+                free(msgs->messages[i].message_id);
+                free(msgs->messages[i].text);
+            }
+            free(msgs);
+            break;
+        }
+        case BEEPER_TASK_EVENT_MESSAGE_DECRYPTED: {
+            beeper_task_message_decrypted_t * d = event_data;
+            free(d->room_id);
+            free(d->message_id);
+            free(d->text);
+            free(d);
+            break;
+        }
+        default:
+            free(event_data);
+            break;
+    }
+}
+
 void beeper_task_sas_matches(beeper_task_t * t)
 {
-    safe_queue_push(t, BEEPER_TASK_RECEIVED_EVENT_SAS_MATCHES);
+    safe_queue_push(t, BEEPER_TASK_RECEIVED_EVENT_SAS_MATCHES, NULL);
+}
+
+void beeper_task_request_messages(beeper_task_t * t, const char * room_id, const char * chunk_id,
+                                  beeper_task_direction_t direction)
+{
+    debug("request messages");
+
+    beeper_received_message_request_t * m_req = beeper_asserting_calloc(1, sizeof(*m_req));
+    m_req->room_id = beeper_asserting_strdup(room_id);
+    if(chunk_id) m_req->chunk_id = beeper_asserting_strdup(chunk_id);
+    m_req->direction = direction;
+
+    safe_queue_push(t, BEEPER_TASK_RECEIVED_EVENT_REQUEST_MESSAGES, m_req);
 }

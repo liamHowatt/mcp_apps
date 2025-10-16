@@ -292,16 +292,28 @@ static void make_enc_kpd_group(void)
     }
 }
 
+static void app_obj_delete_cb(lv_event_t * e)
+{
+  lv_obj_remove_flag(lv_obj_get_child(lv_screen_active(), 0), LV_OBJ_FLAG_HIDDEN);
+}
+
 static void app_clicked_cb(lv_event_t * e)
 {
-  lv_obj_clean(lv_screen_active());
+  lv_obj_add_flag(lv_obj_get_child(lv_screen_active(), 0), LV_OBJ_FLAG_HIDDEN);
   lv_obj_t * base_obj = lv_obj_create(lv_screen_active());
   lv_obj_remove_style_all(base_obj);
   lv_obj_set_size(base_obj, LV_PCT(100), LV_PCT(100));
   lv_obj_set_style_bg_color(base_obj, lv_color_white(), 0);
   lv_obj_set_style_bg_opa(base_obj, LV_OPA_COVER, 0);
+  lv_obj_add_event_cb(base_obj, app_obj_delete_cb, LV_EVENT_DELETE, NULL);
   void (*app_cb)(lv_obj_t * base_obj) = lv_event_get_user_data(e);
   app_cb(base_obj);
+}
+
+static void quit_clicked_cb(lv_event_t * e)
+{
+  bool * quit = lv_event_get_user_data(e);
+  *quit = true;
 }
 
 /****************************************************************************
@@ -384,8 +396,11 @@ int main(int argc, FAR char *argv[])
   lv_obj_set_style_radius(list, 0, 0);
   lv_obj_set_style_border_width(list, 0, 0);
 
-  lv_obj_t * btn;
-  (void)btn;
+  bool quit = false;
+
+  lv_obj_t * btn = lv_list_add_button(list, LV_SYMBOL_POWER, NULL);
+  lv_group_remove_obj(btn);
+  lv_obj_add_event_cb(btn, quit_clicked_cb, LV_EVENT_CLICKED, &quit);
 #ifdef CONFIG_MCP_APPS_PEANUT_GB
   btn = lv_list_add_button(list, NULL, "Peanut GB");
   lv_group_remove_obj(btn);
@@ -405,13 +420,16 @@ int main(int argc, FAR char *argv[])
 #ifdef CONFIG_LV_USE_NUTTX_LIBUV
   lv_nuttx_uv_loop(&ui_loop, &result);
 #else
-  mcp_lvgl_poll_run_until_done();
+  while(mcp_lvgl_poll_run(lv_timer_handler()) && !quit);
 #endif
 
 // demo_end:
   lv_nuttx_deinit(&result);
   mcp_lvgl_poll_deinit();
   lv_deinit();
+
+  boardctl(BOARDIOC_POWEROFF, 0);
+  assert(0);
 
   return 0;
 }
