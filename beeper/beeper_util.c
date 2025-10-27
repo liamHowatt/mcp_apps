@@ -71,6 +71,16 @@ void beeper_array_destroy(beeper_array_t * ba)
     free(ba->data);
 }
 
+void beeper_array_destroy_custom(beeper_array_t * ba, void (*cb)(void * item, void * user_data), void * user_data)
+{
+    uint8_t * p = ba->data;
+    for(size_t i = 0; i < ba->len; i++) {
+        cb(p, user_data);
+        p += ba->item_size;
+    }
+    beeper_array_destroy(ba);
+}
+
 size_t beeper_array_len(beeper_array_t * ba)
 {
     return ba->len;
@@ -81,7 +91,7 @@ void * beeper_array_data(beeper_array_t * ba)
     return ba->data;
 }
 
-void beeper_array_append(beeper_array_t * ba, const void * to_append)
+void * beeper_array_append(beeper_array_t * ba, const void * to_append)
 {
     if(ba->len == ba->cap) {
         if(ba->cap == 0) ba->cap = 2;
@@ -89,10 +99,12 @@ void beeper_array_append(beeper_array_t * ba, const void * to_append)
         ba->data = realloc(ba->data, ba->cap * ba->item_size);
         assert(ba->data);
     }
+    void * new_slot = ba->data + ba->len * ba->item_size;
     if(to_append) {
-        memcpy(ba->data + ba->len * ba->item_size, to_append, ba->item_size);
+        memcpy(new_slot, to_append, ba->item_size);
     }
     ba->len += 1;
+    return new_slot;
 }
 
 void beeper_array_remove(beeper_array_t * ba, size_t index)
@@ -103,6 +115,13 @@ void beeper_array_remove(beeper_array_t * ba, size_t index)
         size_t offset = index * ba->item_size;
         memmove(ba->data + offset, ba->data + (offset + ba->item_size), (ba->len - index) * ba->item_size);
     }
+}
+
+void beeper_array_remove_item(beeper_array_t * ba, void * to_remove)
+{
+    ptrdiff_t byte_offset = to_remove - ba->data;
+    size_t index = byte_offset / ba->item_size;
+    beeper_array_remove(ba, index);
 }
 
 void beeper_array_reset(beeper_array_t * ba)
@@ -162,20 +181,34 @@ int beeper_queue_get_poll_fd(const beeper_queue_t * bq)
     return bq->evfd;
 }
 
-static void dict_clear(beeper_array_t * ba, beeper_dict_cb_t destroy_cb)
+static void dict_clear(beeper_array_t * ba, beeper_dict_cb_t destroy_cb, void * user_data)
 {
     size_t array_len = beeper_array_len(ba);
     size_t item_size = ba->item_size;
     uint8_t * p = beeper_array_data(ba);
     for(size_t i = 0; i < array_len; i++) {
-        if(destroy_cb) destroy_cb(p);
+        if(destroy_cb) destroy_cb(p, user_data);
         free(*(char **)p);
         p += item_size;
     }
 }
 
 void * beeper_dict_get_create(beeper_array_t * ba, const char * key,
-                              beeper_dict_cb_t create_cb, bool * was_created)
+                              beeper_dict_cb_t create_cb, bool * was_created, void * user_data)
+{
+    void * p = beeper_dict_get(ba, key);
+    if(p) {
+        if(was_created) *was_created = false;
+        return p;
+    }
+    p = beeper_array_append(ba, NULL);
+    *(char **)p = beeper_asserting_strdup(key);
+    if(create_cb) create_cb(p, user_data);
+    if(was_created) *was_created = true;
+    return p;
+}
+
+void * beeper_dict_get(beeper_array_t * ba, const char * key)
 {
     size_t array_len = beeper_array_len(ba);
     size_t item_size = ba->item_size;
@@ -183,31 +216,22 @@ void * beeper_dict_get_create(beeper_array_t * ba, const char * key,
     for(size_t i = 0; i < array_len; i++) {
         char * item_key = *(char **)p;
         if(0 == strcmp(key, item_key)) {
-            if(was_created) *was_created = false;
             return p;
         }
         p += item_size;
     }
-    beeper_array_append(ba, NULL);
-    p = beeper_array_data(ba);
-    p += (array_len * item_size);
-    char * key_copy = strdup(key);
-    assert(key_copy);
-    *(char **)p = key_copy;
-    if(create_cb) create_cb(p);
-    if(was_created) *was_created = true;
-    return p;
+    return NULL;
 }
 
-void beeper_dict_destroy(beeper_array_t * ba, beeper_dict_cb_t destroy_cb)
+void beeper_dict_destroy(beeper_array_t * ba, beeper_dict_cb_t destroy_cb, void * user_data)
 {
-    dict_clear(ba, destroy_cb);
+    dict_clear(ba, destroy_cb, user_data);
     beeper_array_destroy(ba);
 }
 
-void beeper_dict_reset(beeper_array_t * ba, beeper_dict_cb_t destroy_cb)
+void beeper_dict_reset(beeper_array_t * ba, beeper_dict_cb_t destroy_cb, void * user_data)
 {
-    dict_clear(ba, destroy_cb);
+    dict_clear(ba, destroy_cb, user_data);
     beeper_array_reset(ba);
 }
 
@@ -364,4 +388,55 @@ char * beeper_rcstr_str(beeper_rcstr_t * rcstr)
 {
     if(rcstr == NULL) return NULL;
     return rcstr->s;
+}
+
+void * beeper_lru_get_no_rearrange(const beeper_lru_class_t * class, void * array, void * cmp_user_data)
+{
+    void * p = array;
+    for(size_t i = 0; i < class->capacity; i++) {
+        if(class->cmp(p, cmp_user_data)) {
+            return p;
+        }
+        p += class->item_size;
+    }
+    return NULL;
+}
+
+void * beeper_lru_get(const beeper_lru_class_t * class, void * array, void * cmp_user_data)
+{
+    void * p = array;
+    for(size_t i = 0; i < class->capacity; i++) {
+        if(class->cmp(p, cmp_user_data)) {
+
+            if(i > 0) {
+                void * tmp = beeper_asserting_malloc(class->item_size);
+                memcpy(tmp, p, class->item_size);
+                memmove(array + class->item_size, array, i * class->item_size);
+                memcpy(array, tmp, class->item_size);
+                free(tmp);
+            }
+
+            return array;
+        }
+        p += class->item_size;
+    }
+    return NULL;
+}
+
+void * beeper_lru_add_unchecked(const beeper_lru_class_t * class, void * array, void * to_add, void * destroy_user_data)
+{
+    assert(class->capacity > 0);
+    class->destroy(array + class->item_size * (class->capacity - 1), destroy_user_data);
+    memmove(array + class->item_size, array, class->item_size * (class->capacity - 1));
+    if(to_add) memcpy(array, to_add, class->item_size);
+    return array;
+}
+
+void beeper_lru_destroy(const beeper_lru_class_t * class, void * array, void * destroy_user_data)
+{
+    void * p = array;
+    for(size_t i = 0; i < class->capacity; i++) {
+        class->destroy(p, destroy_user_data);
+        p += class->item_size;
+    }
 }

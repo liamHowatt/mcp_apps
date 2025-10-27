@@ -455,10 +455,11 @@ static void texter_event_cb(texter_ui_t * x, texter_ui_event_type_t type, texter
                     texter_ui_future_set_message_static(fut, msg->text, msg->member);
                 }
                 else if(msg->message_id == NULL) {
-                    assert(room->bubble_top_requested_chunk_id == NULL);
-                    room->bubble_top_requested_chunk_id = next_chunk_id;
-                    beeper_rcstr_incref(next_chunk_id);
-                    beeper_task_request_messages(c->task, room->room_id, beeper_rcstr_str(next_chunk_id), BEEPER_TASK_DIRECTION_UP);
+                    if(room->bubble_top_requested_chunk_id == NULL) {
+                        room->bubble_top_requested_chunk_id = next_chunk_id;
+                        beeper_rcstr_incref(next_chunk_id);
+                        beeper_task_request_messages(c->task, room->room_id, beeper_rcstr_str(next_chunk_id), BEEPER_TASK_DIRECTION_UP);
+                    }
                 }
                 room->bubble_top = msg;
                 if(room->bubble_bottom == NULL) room->bubble_bottom = msg;
@@ -482,8 +483,7 @@ static void texter_event_cb(texter_ui_t * x, texter_ui_event_type_t type, texter
                     texter_ui_future_set_message_static(fut, msg->text, msg->member);
                 }
                 else if(msg->message_id == NULL) {
-                    if(room->msg_window_is_not_caught_up) {
-                        assert(room->bubble_bottom_requested_chunk_id == NULL);
+                    if(room->msg_window_is_not_caught_up && room->bubble_bottom_requested_chunk_id == NULL) {
                         room->bubble_bottom_requested_chunk_id = next_chunk_id;
                         beeper_rcstr_incref(next_chunk_id);
                         beeper_task_request_messages(c->task, room->room_id, beeper_rcstr_str(next_chunk_id), BEEPER_TASK_DIRECTION_DOWN);

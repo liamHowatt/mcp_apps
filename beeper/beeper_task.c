@@ -10,8 +10,12 @@
 
 #include <olm/olm.h>
 #include <olm/sas.h>
+#include <olm/base64.h> /* this is not a public API. it could change anytime */
 
 #include <mcp/mcp_lvgl.h>
+
+#define ROOM_SESSION_LRU_COUNT 4
+#define USER_SESSION_LRU_COUNT 4
 
 typedef struct {
     WOLFSSL_CTX * wolfssl_ctx;
@@ -48,6 +52,22 @@ typedef struct {
 } beeper_task_queue_item_t;
 
 typedef struct {
+    OlmSession * sessions[USER_SESSION_LRU_COUNT];
+} user_sessions_t;
+
+typedef struct {
+    uint8_t type;
+    const char * ciphertext;
+    size_t ciphertext_len;
+    const char * sender_key;
+    size_t sender_key_len;
+    char * plaintext;
+} user_session_lru_cmp_user_data_t;
+
+typedef struct {
+} user_session_lru_destroy_user_data_t;
+
+typedef struct {
     char * key_id;
     char * key_value;
 } key_list_key_t;
@@ -63,6 +83,7 @@ typedef struct {
     char * user_id;
     bool outdated;
     bool dont_save;
+    bool all_devices;
     bool ssk_was_signed_by_master;
     uint32_t device_count;
     uint32_t master_key_count;
@@ -84,6 +105,8 @@ typedef enum {
     MATRIX_EVENT_TYPE_M_ROOM_CANONICAL_ALIAS,
     MATRIX_EVENT_TYPE_M_ROOM_NAME,
     MATRIX_EVENT_TYPE_M_ROOM_MESSAGE,
+    MATRIX_EVENT_TYPE_M_ROOM_ENCRYPTED,
+    MATRIX_EVENT_TYPE_M_BRIDGE,
 } matrix_event_type_t;
 
 typedef enum {
@@ -99,12 +122,45 @@ typedef enum {
     ROOM_NAME_TYPE_NAME,
 } room_name_type_t;
 
+typedef enum {
+    ROOM_DECRYPTING_STATE_BRIDGEBOT,
+    ROOM_DECRYPTING_STATE_SESSION,
+} room_decrypting_state_t;
+
+typedef struct {
+    char * message_id;
+    char * ciphertext;
+} room_decrypting_message_t;
+
+typedef struct {
+    char * session_id;
+    char * sender_key;
+    room_decrypting_state_t state;
+    beeper_array_t msgs;
+} room_decrypting_t;
+
+typedef struct {
+    char * session_id;
+    char * pickle;
+    OlmInboundGroupSession * session;
+    bool needs_save;
+} room_session_t;
+
 typedef struct {
     char * room_id;
+    bool dir_created;
     room_name_type_t name_type;
     char * name;
     beeper_array_t members;
+    beeper_array_t decrypting;
+    char * bridgebot;
+    room_session_t session_lru[ROOM_SESSION_LRU_COUNT];
 } room_t;
+
+typedef struct {
+    beeper_task_t * t;
+    room_t * room;
+} room_session_lru_user_data_t;
 
 typedef struct {
     char * user_id;
@@ -130,6 +186,9 @@ struct beeper_task_t {
     char * auth_header;
     char * device_id;
     OlmAccount * olm_account;
+
+    bool user_sessions_dir_created;
+    bool rooms_dir_created;
 
     // bool key_list_got_initial_changes;
     bool key_list_has_outdated;
@@ -166,9 +225,11 @@ typedef struct {
 #define STRING_LITERAL_LEN(s) (sizeof(s) - 1)
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
+#define ARRAY_LEN(arr) (sizeof(arr) / sizeof(*(arr)))
 
 #define BEEPER_MATRIX_URL "matrix.beeper.com"
-#define ONE_TIME_KEY_COUNT_TARGET 10
+#define ONE_TIME_KEY_COUNT_TOPUP 15
+#define ONE_TIME_KEY_COUNT_LOW_WATERMARK 10
 
 #define TXNID_INCREMNET 0x10000ull
 
@@ -178,8 +239,10 @@ typedef struct {
 #define OK_STATUS_START "HTTP/1.1 2"
 #define CONTENT_LENGTH_HEADER "\r\nContent-Length:"
 
-#define SENDTODEVICE_PATH_FMT(event_type) "sendToDevice/"event_type"/%016"PRIX64
-#define SENDTODEVICE_PATH_SIZE(event_type) (STRING_LITERAL_LEN("sendToDevice/"event_type"/") + 16)
+#define TXNID_FMT "%016"PRIX64
+#define TXNID_SIZE 16
+#define SENDTODEVICE_PATH_FMT(event_type) "sendToDevice/"event_type"/"TXNID_FMT
+#define SENDTODEVICE_PATH_SIZE(event_type) (STRING_LITERAL_LEN("sendToDevice/"event_type"/") + TXNID_SIZE)
 
 static const unsigned char beeper_matrix_root_cert[] = R"(-----BEGIN CERTIFICATE-----
 MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw
@@ -214,6 +277,29 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
 -----END CERTIFICATE-----
 )";
 
+static cJSON * unwrap_cjson(cJSON * item);
+static cJSON * sign_json(beeper_task_t * t, cJSON * json);
+
+static char * base64_encode(const char * input)
+{
+    size_t input_len = strlen(input);
+    size_t encoded_len = _olm_encode_base64_length(input_len);
+    char * encoded = beeper_asserting_malloc(encoded_len + 1);
+    _olm_encode_base64((const uint8_t *) input, input_len, (uint8_t *) encoded);
+    encoded[encoded_len] = '\0';
+    return encoded;
+}
+
+static void base64_filename_safe(char * s)
+{
+    char c;
+    while((c = *s)) {
+        if(c == '+') *s = '-';
+        else if(c == '/') *s = '_';
+        s++;
+    }
+}
+
 static char * txnid_make_path_(beeper_task_t * t)
 {
     char * txnid_path;
@@ -226,7 +312,7 @@ static void txnid_range_end_update_(beeper_task_t * t, char * txnid_path)
 {
     int res, fd;
     ssize_t rwres;
-    char txnid_buf[17];
+    char txnid_buf[TXNID_SIZE + 1];
 
     char * free_me = NULL;
     if(txnid_path == NULL) {
@@ -235,8 +321,9 @@ static void txnid_range_end_update_(beeper_task_t * t, char * txnid_path)
 
     t->txnid_range_end = t->txnid + TXNID_INCREMNET;
 
-    sprintf(txnid_buf, "%016"PRIX64, t->txnid_range_end);
-    fd = open(txnid_path, O_CREAT | O_TRUNC | O_WRONLY, 0644);
+    snprintf(txnid_buf, sizeof(txnid_buf), TXNID_FMT, t->txnid_range_end);
+    debug("open: '%s' CREAT TRUNC WRONLY", txnid_path);
+    fd = open(txnid_path, O_CREAT | O_TRUNC | O_WRONLY, 0666);
     assert(fd >= 0);
     rwres = write(fd, txnid_buf, 16);
     assert(rwres == 16);
@@ -257,6 +344,7 @@ static void txnid_init(beeper_task_t * t)
 
     char * txnid_path = txnid_make_path_(t);
 
+    debug("open: '%s' RDONLY", txnid_path);
     fd = open(txnid_path, O_RDONLY);
     if(fd < 0) {
         assert(errno == ENOENT);
@@ -304,7 +392,8 @@ static void pickle_account(beeper_task_t * t)
     char * account_pickle_path;
     int res = asprintf(&account_pickle_path, "%solm_account_pickle", t->upath);
     assert(res != -1);
-    int fd = open(account_pickle_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    debug("open: '%s' WRONLY CREAT TRUNC", account_pickle_path);
+    int fd = open(account_pickle_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
     assert(fd != -1);
     free(account_pickle_path);
     ssize_t bw = write(fd, account_pickle, account_pickle_length);
@@ -324,7 +413,8 @@ static cJSON * get_n_one_time_keys(beeper_task_t * t, int n)
 
     cJSON * otks_json = cJSON_ParseWithLength(otks_buf, otks_buf_len);
     free(otks_buf);
-    int otks_n = cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(otks_json, "curve25519"));
+    cJSON * curve_obj = unwrap_cjson(cJSON_GetObjectItemCaseSensitive(otks_json, "curve25519"));
+    int otks_n = cJSON_GetArraySize(curve_obj);
     assert(otks_n <= n); /* assured by the usage pattern */
 
     if(otks_n < n) {
@@ -347,17 +437,92 @@ static cJSON * get_n_one_time_keys(beeper_task_t * t, int n)
 
         otks_json = cJSON_ParseWithLength(otks_buf, otks_buf_len);
         free(otks_buf);
-        otks_n = cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(otks_json, "curve25519"));
+        curve_obj = unwrap_cjson(cJSON_GetObjectItemCaseSensitive(otks_json, "curve25519"));
+        otks_n = cJSON_GetArraySize(curve_obj);
         assert(otks_n == n);
     }
 
-    return otks_json;
+    cJSON * ret_json = unwrap_cjson(cJSON_CreateObject());
+    cJSON * one_time_keys = unwrap_cjson(cJSON_CreateObject());
+    cJSON_AddItemToObjectCS(ret_json, "one_time_keys", one_time_keys);
+
+    cJSON * item;
+    while((item = curve_obj->child)) {
+        cJSON * otk_entry = unwrap_cjson(cJSON_CreateObject());
+
+        char * entry_name;
+        assert(-1 != asprintf(&entry_name, "signed_curve25519:%s", item->string));
+        assert(cJSON_AddItemToObject(one_time_keys, entry_name, otk_entry));
+        free(entry_name);
+
+        cJSON_AddItemToObjectCS(otk_entry, "key", cJSON_DetachItemViaPointer(curve_obj, item));
+
+        cJSON_AddItemToObjectCS(otk_entry, "signatures", sign_json(t, otk_entry));
+    }
+
+    cJSON_Delete(otks_json);
+
+    size_t fallback_key_length = olm_account_unpublished_fallback_key_length(t->olm_account);
+    char * fallback_key = malloc(fallback_key_length);
+    assert(fallback_key);
+    olm_res = olm_account_unpublished_fallback_key(t->olm_account, fallback_key, fallback_key_length);
+    assert(olm_res == fallback_key_length);
+    cJSON * fallback_key_json = cJSON_ParseWithLength(fallback_key, fallback_key_length);
+    free(fallback_key);
+    cJSON * fallback_curve = cJSON_GetObjectItemCaseSensitive(fallback_key_json, "curve25519");
+    if(fallback_curve->child == NULL) {
+        cJSON_Delete(fallback_key_json);
+
+        size_t random_length = olm_account_generate_fallback_key_random_length(t->olm_account);
+        void * random = gen_random(t->rng_fd, random_length);
+        olm_res = olm_account_generate_fallback_key(t->olm_account, random, random_length);
+        assert(olm_res == 1);
+        free(random);
+
+        fallback_key_length = olm_account_unpublished_fallback_key_length(t->olm_account);
+        fallback_key = malloc(fallback_key_length);
+        assert(fallback_key);
+        olm_res = olm_account_unpublished_fallback_key(t->olm_account, fallback_key, fallback_key_length);
+        assert(olm_res == fallback_key_length);
+        fallback_key_json = cJSON_ParseWithLength(fallback_key, fallback_key_length);
+        free(fallback_key);
+        fallback_curve = cJSON_GetObjectItemCaseSensitive(fallback_key_json, "curve25519");
+        assert(fallback_curve->child != NULL);
+    }
+    assert(fallback_curve->child->next == NULL);
+
+    cJSON * fallback_keys = unwrap_cjson(cJSON_CreateObject());
+    cJSON_AddItemToObjectCS(ret_json, "fallback_keys", fallback_keys);
+
+    cJSON * fallback_key_entry = unwrap_cjson(cJSON_CreateObject());
+    char * entry_name;
+    assert(-1 != asprintf(&entry_name, "signed_curve25519:%s", fallback_curve->child->string));
+    assert(cJSON_AddItemToObject(fallback_keys, entry_name, fallback_key_entry));
+    free(entry_name);
+
+    cJSON_AddItemToObjectCS(fallback_key_entry, "fallback", unwrap_cjson(cJSON_CreateTrue()));
+
+    cJSON_AddItemToObjectCS(fallback_key_entry, "key", cJSON_DetachItemViaPointer(fallback_curve, fallback_curve->child));
+
+    cJSON_AddItemToObjectCS(fallback_key_entry, "signatures", sign_json(t, fallback_key_entry));
+
+    cJSON_Delete(fallback_key_json);
+
+    pickle_account(t);
+
+    return ret_json;
 }
 
 static cJSON * unwrap_cjson(cJSON * item)
 {
     assert(item);
     return item;
+}
+
+static double unwrap_number(cJSON * item)
+{
+    assert(cJSON_IsNumber(item));
+    return cJSON_GetNumberValue(item);
 }
 
 static bool cjson_array_has_string(cJSON * array, const char * string)
@@ -472,7 +637,7 @@ static void request_send(beeper_task_https_conn_t * conn, const char * method, c
 {
     int res;
 
-    debug("%s %s", method, path);
+    debug("%s %s %s", method, path, json_str ? json_str : "(no body)");
 
     char * req;
     int req_len;
@@ -779,6 +944,286 @@ static bool verify_signature(OlmUtility * olm_verify, cJSON * to_verify,
     return ret;
 }
 
+static char * user_sessions_make_dir_and_path(beeper_task_t * t, const char * user_id)
+{
+    int res;
+
+    char * encoded_user_id = base64_encode(user_id);
+    base64_filename_safe(encoded_user_id);
+
+    char * path;
+    res = asprintf(&path, "%susers/%s", t->upath, encoded_user_id);
+    assert(res > 0);
+
+    free(encoded_user_id);
+
+    if(!t->user_sessions_dir_created) {
+        t->user_sessions_dir_created = true;
+
+        char * last_sep = strrchr(path, '/');
+        *last_sep = '\0';
+
+        res = mkdir(path, 0755);
+        assert(res == 0 || errno == EEXIST);
+
+        *last_sep = '/';
+    }
+
+    return path;
+}
+
+static void user_sessions_load(user_sessions_t * sessions, beeper_task_t * t, const char * user_id)
+{
+    int res;
+    ssize_t rwres;
+    size_t olmres;
+
+    memset(sessions, 0, sizeof(*sessions));
+
+    char * path = user_sessions_make_dir_and_path(t, user_id);
+    debug("fopen: '%s' r", path);
+    FILE * f = fopen(path, "r");
+    free(path);
+
+    if(!f) {
+        assert(errno == ENOENT);
+        return;
+    }
+
+    char * lineptr = NULL;
+    size_t n = 0;
+
+    for(size_t i = 0; i < ARRAY_LEN(sessions->sessions); i++) {
+        errno = 0;
+        rwres = getline(&lineptr, &n, f);
+        if(rwres < 0) {
+            assert(errno == 0);
+            break;
+        }
+
+        assert(rwres >= 2);
+        size_t line_len = rwres - 1;
+        assert(lineptr[line_len] == '\n');
+
+        sessions->sessions[i] = beeper_asserting_malloc(olm_session_size());
+        olm_session(sessions->sessions[i]);
+        /* lineptr contents are "destroyed" */
+        olmres = olm_unpickle_session(sessions->sessions[i], NULL, 0, lineptr, line_len);
+        assert(olmres != olm_error());
+    }
+
+    free(lineptr);
+
+    res = fclose(f);
+    assert(res == 0);
+}
+
+static void user_sessions_save(user_sessions_t * sessions, beeper_task_t * t, const char * user_id)
+{
+    int res;
+    size_t olmres;
+
+    char * path = user_sessions_make_dir_and_path(t, user_id);
+    debug("fopen: '%s' w", path);
+    FILE * f = fopen(path, "w");
+    assert(f);
+    free(path);
+
+    void * pickle_buf = NULL;
+    size_t pickle_buf_size = 0;
+
+    for(size_t i = 0; i < ARRAY_LEN(sessions->sessions); i++) {
+        if(sessions->sessions[i] == NULL) {
+            break;
+        }
+
+        size_t pickle_size = olm_pickle_session_length(sessions->sessions[i]);
+        assert(pickle_size != olm_error()); /* sanity */
+        if(pickle_size > pickle_buf_size) {
+            pickle_buf_size = pickle_size;
+            free(pickle_buf);
+            pickle_buf = beeper_asserting_malloc(pickle_buf_size);
+        }
+
+        olmres = olm_pickle_session(sessions->sessions[i], NULL, 0, pickle_buf, pickle_buf_size);
+        assert(olmres == pickle_size);
+
+        size_t fwriteres = fwrite(pickle_buf, 1, pickle_size, f);
+        assert(fwriteres == pickle_size);
+        res = putc('\n', f);
+        assert(res != EOF);
+    }
+
+    free(pickle_buf);
+
+    res = fclose(f);
+    assert(res == 0);
+}
+
+static void user_sessions_destroy(user_sessions_t * sessions)
+{
+    for(size_t i = 0; i < ARRAY_LEN(sessions->sessions); i++) {
+        if(sessions->sessions[i] == NULL) {
+            break;
+        }
+
+        olm_clear_session(sessions->sessions[i]);
+        free(sessions->sessions[i]);
+    }
+}
+
+static char * user_session_decrypt(OlmSession * session, uint8_t type, const char * ciphertext, size_t ciphertext_len)
+{
+    char * ciphertext_buf = beeper_asserting_malloc(ciphertext_len); /* olm overwrites the input. */
+
+    memcpy(ciphertext_buf, ciphertext, ciphertext_len);
+    size_t plaintext_max_len = olm_decrypt_max_plaintext_length(session, type, ciphertext_buf, ciphertext_len);
+    if(plaintext_max_len == olm_error()) {
+        free(ciphertext_buf);
+        return NULL;
+    }
+
+    char * plaintext = beeper_asserting_malloc(plaintext_max_len + 1);
+
+    memcpy(ciphertext_buf, ciphertext, ciphertext_len);
+    size_t plaintext_len = olm_decrypt(session, type, ciphertext_buf, ciphertext_len, plaintext, plaintext_max_len);
+    free(ciphertext_buf);
+    if(plaintext_len == olm_error()) {
+        free(plaintext);
+        return NULL;
+    }
+    assert(plaintext_len <= plaintext_max_len);
+
+    plaintext[plaintext_len] = '\0';
+
+    if(plaintext_len < plaintext_max_len) {
+        plaintext = beeper_asserting_realloc(plaintext, plaintext_len + 1);
+    }
+
+    return plaintext;
+}
+
+static void user_session_destroy(void * session_v, void * user_data)
+{
+    OlmSession * session = *(OlmSession **)session_v;
+
+    if(session == NULL) {
+        return;
+    }
+
+    olm_clear_session(session);
+    free(session);
+}
+
+static bool user_session_cmp(void * session_v, void * user_data)
+{
+    OlmSession * session = *(OlmSession **)session_v;
+    user_session_lru_cmp_user_data_t * ud = user_data;
+
+    assert(ud->plaintext == NULL);
+
+    if(session == NULL) {
+        return false;
+    }
+
+    if(ud->type == 0) {
+        char * ciphertext_buf = beeper_asserting_malloc(ud->ciphertext_len);
+        memcpy(ciphertext_buf, ud->ciphertext, ud->ciphertext_len); /* olm_matches_inbound_session_from destroys the ciphertext */
+        size_t olmres = olm_matches_inbound_session_from(session, ud->sender_key, ud->sender_key_len, ciphertext_buf, ud->ciphertext_len);
+        free(ciphertext_buf);
+        if(olmres != 1) {
+            return false;
+        }
+    }
+
+    ud->plaintext = user_session_decrypt(session, ud->type, ud->ciphertext, ud->ciphertext_len);
+
+    return ud->plaintext != NULL;
+}
+
+static const beeper_lru_class_t user_session_lru_class = {
+    .capacity = USER_SESSION_LRU_COUNT,
+    .item_size = sizeof(OlmSession *),
+    .destroy = user_session_destroy,
+    .cmp = user_session_cmp,
+};
+
+static cJSON * decrypt(beeper_task_t * t, const char * ciphertext, uint8_t type, const char * user_id,
+                       const char * sender_key)
+{
+    size_t olmres;
+
+    user_sessions_t sessions;
+    user_sessions_load(&sessions, t, user_id);
+
+    size_t ciphertext_len = strlen(ciphertext);
+    size_t sender_key_len = strlen(sender_key);
+
+    user_session_lru_cmp_user_data_t cmp_data = {
+        .type = type,
+        .ciphertext = ciphertext,
+        .ciphertext_len = ciphertext_len,
+        .sender_key = sender_key,
+        .sender_key_len = sender_key_len,
+        .plaintext = NULL,
+    };
+    OlmSession ** session_p = beeper_lru_get(&user_session_lru_class, sessions.sessions, &cmp_data);
+    OlmSession * session = session_p ? *session_p : NULL;
+    char * plaintext = cmp_data.plaintext;
+    assert((session != NULL) == (plaintext != NULL));
+
+    bool remove_otk = false;
+
+    if(plaintext == NULL) {
+        if(type == 0) {
+            session = beeper_asserting_malloc(olm_session_size());
+            olm_session(session);
+            char * ciphertext_buf = beeper_asserting_malloc(ciphertext_len);
+            memcpy(ciphertext_buf, ciphertext, ciphertext_len); /* olm_create_inbound_session_from destroys the ciphertext */
+            olmres = olm_create_inbound_session_from(session, t->olm_account, sender_key, sender_key_len, ciphertext_buf, ciphertext_len);
+            free(ciphertext_buf);
+            if(olmres == olm_error()) {
+                free(session);
+                user_sessions_destroy(&sessions);
+                return NULL;
+            }
+            plaintext = user_session_decrypt(session, type, ciphertext, ciphertext_len);
+            if(plaintext == NULL) {
+                free(session);
+                user_sessions_destroy(&sessions);
+                return NULL;
+            }
+            beeper_lru_add_unchecked(&user_session_lru_class, sessions.sessions, &session, NULL);
+            remove_otk = true;
+        }
+        else {
+            user_sessions_destroy(&sessions);
+            return NULL;
+        }
+    }
+
+    user_sessions_save(&sessions, t, user_id);
+
+    if(remove_otk) {
+        olmres = olm_remove_one_time_keys(t->olm_account, session);
+        if(olmres == olm_error()) {
+            assert(olm_account_last_error_code(t->olm_account) == OLM_BAD_MESSAGE_KEY_ID);
+        }
+        else {
+            /* can have a false-positive where the key was the fallback key and the
+               account is unchanged. Save the account anyways.
+             */
+            pickle_account(t);
+        }
+    }
+
+    cJSON * retval = unwrap_cjson(cJSON_Parse(plaintext));
+    free(plaintext);
+
+    user_sessions_destroy(&sessions);
+    return retval;
+}
+
 static char * key_list_make_path_(beeper_task_t * t)
 {
     char * key_list_path;
@@ -843,6 +1288,7 @@ static void key_list_init_read_keys_helper_(key_list_key_t ** keys, uint32_t * c
 static void key_list_init(beeper_task_t * t)
 {
     char * path = key_list_make_path_(t);
+    debug("fopen: '%s' r", path);
     FILE * f = fopen(path, "r");
     free(path);
     if(!f) {
@@ -862,6 +1308,7 @@ static void key_list_init(beeper_task_t * t)
     for(uint32_t i = 0; i < t->key_list_user_count; i++) {
         key_list_user_t * user = &t->key_list_users[i];
         user->user_id = key_list_init_getline_helper_(&dat);
+        user->all_devices = key_list_init_scan_helper_(f);
         user->ssk_was_signed_by_master = key_list_init_scan_helper_(f);
         user->device_count = key_list_init_scan_helper_(f);
         if(user->device_count) user->devices = beeper_asserting_calloc(user->device_count, sizeof(*user->devices));
@@ -923,9 +1370,11 @@ static void key_list_update_(beeper_task_t * t)
         cJSON * device_array = unwrap_cjson(cJSON_CreateArray());
         cJSON_AddItemToObjectCS(req_json_device_keys, user->user_id, device_array);
 
-        assert(user->device_count > 0);
-        for(uint32_t j = 0; j < user->device_count; j++) {
-            cJSON_AddItemToArray(device_array, unwrap_cjson(cJSON_CreateStringReference(user->devices[j].device_id)));
+        if(!user->all_devices) {
+            assert(user->device_count > 0);
+            for(uint32_t j = 0; j < user->device_count; j++) {
+                cJSON_AddItemToArray(device_array, unwrap_cjson(cJSON_CreateStringReference(user->devices[j].device_id)));
+            }
         }
     }
 
@@ -951,8 +1400,6 @@ static void key_list_update_(beeper_task_t * t)
             continue;
         }
         user->outdated = false;
-
-        user->ssk_was_signed_by_master = false;
 
         bool had_something = false;
 
@@ -981,6 +1428,21 @@ static void key_list_update_(beeper_task_t * t)
         }
 
         cJSON * dk_json = cJSON_GetObjectItemCaseSensitive(device_keys_json, user->user_id);
+
+        if(user->all_devices) {
+            key_list_devices_free_(user);
+            user->device_count = cJSON_GetArraySize(dk_json);
+            user->devices = user->device_count ? beeper_asserting_calloc(user->device_count, sizeof(*user->devices)) : NULL;
+
+            uint32_t j = 0;
+            cJSON * device_json;
+            assert(cJSON_IsObject(dk_json));
+            cJSON_ArrayForEach(device_json, dk_json) {
+                user->devices[j].device_id = beeper_asserting_strdup(device_json->string);
+                j++;
+            }
+        }
+
         for(uint32_t j = 0; j < user->device_count; j++) {
             key_list_device_t * device = &user->devices[j];
             cJSON * device_json = cJSON_GetObjectItemCaseSensitive(dk_json, device->device_id);
@@ -1048,6 +1510,7 @@ static void key_list_save(beeper_task_t * t)
     debug("saving key list");
 
     char * path = key_list_make_path_(t);
+    debug("fopen: '%s' w", path);
     FILE * f = fopen(path, "w");
     assert(f);
     free(path);
@@ -1061,6 +1524,7 @@ static void key_list_save(beeper_task_t * t)
         if(user->dont_save)
             continue;
         key_list_save_writestr_helper_(user->user_id, f);
+        key_list_save_writeu32_helper_(user->all_devices, f);
         key_list_save_writeu32_helper_(user->ssk_was_signed_by_master, f);
         uint32_t saving_device_count = 0;
         for(uint32_t j = 0; j < user->device_count; j++)
@@ -1154,6 +1618,26 @@ static void key_list_device_get(beeper_task_t * t, const char * user_id, key_lis
     if(device_dst) *device_dst = device;
 }
 
+static void key_list_user_device_get_all(beeper_task_t * t, key_list_user_t * user)
+{
+    if(!user->all_devices) {
+        user->all_devices = true;
+        user->outdated = true;
+        t->key_list_has_outdated = true;
+    }
+
+    if(user->outdated) {
+        key_list_update_(t);
+    }
+}
+
+static key_list_user_t * key_list_device_get_all(beeper_task_t * t, const char * user_id)
+{
+    key_list_user_t * user = key_list_user_get_(t, user_id);
+    key_list_user_device_get_all(t, user);
+    return user;
+}
+
 static void key_list_apply_devicelists(beeper_task_t * t, cJSON * devicelists)
 {
     cJSON * changed = cJSON_GetObjectItemCaseSensitive(devicelists, "changed");
@@ -1218,49 +1702,510 @@ static void room_title_event_send(beeper_task_t * t, const char * room_id, const
     t->event_cb(BEEPER_TASK_EVENT_ROOM_TITLE, title, t->event_cb_user_data);
 }
 
-static void room_member_create(void * room_member_v)
+static void room_member_create(void * room_member_v, void * user_data)
 {
     room_member_t * room_member = room_member_v;
     room_member->display_name = NULL;
 }
 
-static void room_member_destroy(void * room_member_v)
+static void room_member_destroy(void * room_member_v, void * user_data)
 {
     room_member_t * room_member = room_member_v;
     free(room_member->display_name);
 }
 
-static void room_create(void * room_v)
+static char * room_make_path(beeper_task_t * t, room_t * room, const char * child)
 {
-    room_t * room = room_v;
-    room->name_type = ROOM_NAME_TYPE_MEMBERS;
-    room->name = NULL;
-    beeper_array_init(&room->members, sizeof(room_member_t));
+    char * encoded_room_id = base64_encode(room->room_id);
+    base64_filename_safe(encoded_room_id);
+
+    char * room_path;
+    int res = asprintf(&room_path, "%srooms/%s/%s", t->upath, encoded_room_id, child);
+    assert(res > 0);
+
+    free(encoded_room_id);
+
+    return room_path;
 }
 
-static void room_destroy(void * room_v)
+static void create_rooms_dir(beeper_task_t * t)
+{
+    if(t->rooms_dir_created) {
+        return;
+    }
+    t->rooms_dir_created = true;
+
+    char * rooms_path;
+    int res = asprintf(&rooms_path, "%srooms", t->upath);
+    assert(res > 0);
+    res = mkdir(rooms_path, 0755);
+    assert(res == 0 || errno == EEXIST);
+    free(rooms_path);
+}
+
+static void room_create_dir(beeper_task_t * t, room_t * room)
+{
+    if(room->dir_created) {
+        return;
+    }
+    room->dir_created = true;
+
+    create_rooms_dir(t);
+
+    char * room_path = room_make_path(t, room, "");
+    int res = mkdir(room_path, 0755);
+    assert(res == 0 || errno == EEXIST);
+    free(room_path);
+}
+
+static char * room_session_make_path(beeper_task_t * t, room_t * room, const char * session_id)
+{
+    char * session_id_safe = beeper_asserting_strdup(session_id);
+    base64_filename_safe(session_id_safe);
+    char * session_path = room_make_path(t, room, session_id_safe);
+    free(session_id_safe);
+    return session_path;
+}
+
+static char * room_session_make_dirs_and_path(beeper_task_t * t, room_t * room, const char * session_id)
+{
+    room_create_dir(t, room);
+    return room_session_make_path(t, room, session_id);
+}
+
+static void room_session_save(beeper_task_t * t, room_t * room, room_session_t * session)
+{
+    if(!session->needs_save) {
+        return;
+    }
+    session->needs_save = false;
+
+    size_t pickle_len = olm_pickle_inbound_group_session_length(session->session);
+    assert(pickle_len != olm_error());
+    char * pickle = beeper_asserting_malloc(pickle_len + 1);
+    size_t olm_res = olm_pickle_inbound_group_session(session->session, NULL, 0, pickle, pickle_len);
+    assert(olm_res == pickle_len);
+    pickle[pickle_len] = '\0';
+
+    if(session->pickle && 0 == strcmp(pickle, session->pickle)) {
+        free(pickle);
+        return;
+    }
+
+    free(session->pickle);
+    session->pickle = pickle;
+
+    char * session_path = room_session_make_dirs_and_path(t, room, session->session_id);
+
+    debug("open: '%s' CREAT TRUNC WRONLY", session_path);
+    int fd = open(session_path, O_CREAT | O_TRUNC | O_WRONLY, 0666);
+    assert(fd >= 0);
+    free(session_path);
+    ssize_t rwres = write(fd, pickle, pickle_len);
+    assert(rwres == pickle_len);
+    int res = close(fd);
+    assert(res == 0);
+}
+
+static void room_session_destroy(void * session_v, void * user_data)
+{
+    room_session_t * session = session_v;
+    room_session_lru_user_data_t * ud = user_data;
+
+    if(session->session_id) {
+        room_session_save(ud->t, ud->room, session);
+
+        free(session->session_id);
+        free(session->pickle);
+        olm_clear_inbound_group_session(session->session);
+        free(session->session);
+    }
+}
+
+static bool room_session_cmp(void * session_v, void * user_data)
+{
+    room_session_t * session = session_v;
+    char * session_id = user_data;
+
+    return session->session_id && 0 == strcmp(session_id, session->session_id);
+}
+
+static const beeper_lru_class_t room_session_lru_class = {
+    .capacity = ROOM_SESSION_LRU_COUNT,
+    .item_size = sizeof(room_session_t),
+    .destroy = room_session_destroy,
+    .cmp = room_session_cmp,
+};
+
+static void room_create(void * room_v, void * user_data)
 {
     room_t * room = room_v;
+    beeper_task_t * t = user_data;
+    beeper_dict_item_memzero(room, sizeof(*room));
+    room->name_type = ROOM_NAME_TYPE_MEMBERS;
+    beeper_array_init(&room->members, sizeof(room_member_t));
+    beeper_array_init(&room->decrypting, sizeof(room_decrypting_t));
+    room_title_event_send(t, room->room_id, room->room_id);
+}
+
+static void room_decrypting_destroy(void * decrypting_v, void * user_data)
+{
+    room_decrypting_t * decrypting = decrypting_v;
+
+    free(decrypting->session_id);
+    free(decrypting->sender_key);
+
+    uint32_t msg_count = beeper_array_len(&decrypting->msgs);
+    room_decrypting_message_t * msgs = beeper_array_data(&decrypting->msgs);
+    for(uint32_t i = 0; i < msg_count; i++) {
+        free(msgs[i].message_id);
+        free(msgs[i].ciphertext);
+    }
+    beeper_array_destroy(&decrypting->msgs);
+}
+
+static void room_destroy(void * room_v, void * user_data)
+{
+    room_t * room = room_v;
+    beeper_task_t * t = user_data;
+    room_session_lru_user_data_t lru_user_data = {.t = t, .room = room};
+    beeper_lru_destroy(&room_session_lru_class, room->session_lru, &lru_user_data);
     free(room->name);
-    beeper_dict_destroy(&room->members, room_member_destroy);
+    beeper_dict_destroy(&room->members, room_member_destroy, NULL);
+    beeper_array_destroy_custom(&room->decrypting, room_decrypting_destroy, NULL);
+    free(room->bridgebot);
+}
+
+static char * room_session_decrypt(room_session_t * session, const char * ciphertext)
+{
+    size_t ciphertext_len = strlen(ciphertext);
+
+    char * ciphertext_buf = beeper_asserting_malloc(ciphertext_len); /* olm overwrites the input. */
+
+    memcpy(ciphertext_buf, ciphertext, ciphertext_len);
+    size_t plaintext_max_len = olm_group_decrypt_max_plaintext_length(session->session, (uint8_t *) ciphertext_buf, ciphertext_len);
+    assert(plaintext_max_len != olm_error());
+
+    char * plaintext = beeper_asserting_malloc(plaintext_max_len);
+
+    memcpy(ciphertext_buf, ciphertext, ciphertext_len);
+    size_t plaintext_len = olm_group_decrypt(session->session, (uint8_t *) ciphertext_buf, ciphertext_len, (uint8_t *) plaintext, plaintext_max_len, NULL);
+    free(ciphertext_buf);
+    if(plaintext_len == olm_error()) {
+        free(plaintext);
+        debug("olm_group_decrypt ERROR: %s", olm_inbound_group_session_last_error(session->session));
+        return NULL;
+    }
+    assert(plaintext_len <= plaintext_max_len);
+
+    cJSON * plaintext_json = unwrap_cjson(cJSON_ParseWithLength(plaintext, plaintext_len));
+    free(plaintext);
+
+    char * body = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(plaintext_json, "content"), "body"));
+    assert(body);
+    body = beeper_asserting_strdup(body);
+
+    cJSON_Delete(plaintext_json);
+
+    session->needs_save = true;
+
+    return body;
+}
+
+static void room_decrypting_continue_with_bridgebot(beeper_task_t * t, room_t * room, room_decrypting_t * decrypting)
+{
+    decrypting->state = ROOM_DECRYPTING_STATE_SESSION;
+
+    key_list_user_t * bridgebot_user = key_list_device_get_all(t, room->bridgebot);
+
+    uint64_t key_request_txnid = txnid_next(t);
+    char key_request_txnid_buf[TXNID_SIZE + 1];
+    snprintf(key_request_txnid_buf, sizeof(key_request_txnid_buf), TXNID_FMT, key_request_txnid);
+
+    cJSON * cont = unwrap_cjson(cJSON_CreateObject());
+    cJSON_AddItemToObjectCS(cont, "action", unwrap_cjson(cJSON_CreateStringReference("request")));
+    cJSON * body = unwrap_cjson(cJSON_CreateObject());
+    cJSON_AddItemToObjectCS(cont, "body", body);
+    cJSON_AddItemToObjectCS(body, "algorithm", unwrap_cjson(cJSON_CreateStringReference("m.megolm.v1.aes-sha2")));
+    cJSON_AddItemToObjectCS(body, "room_id", unwrap_cjson(cJSON_CreateStringReference(room->room_id)));
+    cJSON_AddItemToObjectCS(body, "sender_key", unwrap_cjson(cJSON_CreateStringReference(decrypting->sender_key)));
+    cJSON_AddItemToObjectCS(body, "session_id", unwrap_cjson(cJSON_CreateStringReference(decrypting->session_id)));
+    cJSON_AddItemToObjectCS(cont, "request_id", unwrap_cjson(cJSON_CreateStringReference(key_request_txnid_buf)));
+    cJSON_AddItemToObjectCS(cont, "requesting_device_id", unwrap_cjson(cJSON_CreateStringReference(t->device_id)));
+
+    cJSON * key_request_full = unwrap_cjson(cJSON_CreateObject());
+    cJSON * users_obj = unwrap_cjson(cJSON_CreateObject());
+    cJSON_AddItemToObjectCS(key_request_full, "messages", users_obj);
+    cJSON * devices_obj = unwrap_cjson(cJSON_CreateObject());
+    cJSON_AddItemToObjectCS(users_obj, room->bridgebot, devices_obj);
+
+    for(uint32_t i = 0; i < bridgebot_user->device_count; i++) {
+        cJSON * to_add;
+        if(i == 0) {
+            to_add = cont;
+        }
+        else {
+            /* wasteful. improve later. */
+            to_add = unwrap_cjson(cJSON_Duplicate(cont, true));
+        }
+        cJSON_AddItemToObjectCS(devices_obj, bridgebot_user->devices[i].device_id, to_add);
+    }
+
+    char * request_json_str = cJSON_PrintUnformatted(key_request_full);
+    assert(request_json_str);
+
+    cJSON_Delete(key_request_full);
+    if(bridgebot_user->device_count == 0) cJSON_Delete(cont);
+
+    char path[SENDTODEVICE_PATH_SIZE("m.room_key_request") + 1];
+    snprintf(path, sizeof(path), SENDTODEVICE_PATH_FMT("m.room_key_request"), txnid_next(t));
+
+    request(&t->https_conn[0], "PUT", path, t->auth_header, request_json_str, false);
+
+    free(request_json_str);
+}
+
+static char * room_decrypt_message(beeper_task_t * t, room_t * room, cJSON * encrypted_event)
+{
+    cJSON * content = cJSON_GetObjectItemCaseSensitive(encrypted_event, "content");
+    assert(cJSON_IsObject(content));
+
+    char * algorithm = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(content, "algorithm"));
+    assert(algorithm && 0 == strcmp(algorithm, "m.megolm.v1.aes-sha2"));
+
+    char * session_id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(content, "session_id"));
+    assert(session_id);
+
+    room_decrypting_t * decrypting = beeper_dict_get(&room->decrypting, session_id);
+    if(decrypting) {
+        char * event_id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(encrypted_event, "event_id"));
+        assert(event_id);
+
+        bool was_created;
+        room_decrypting_message_t * msg = beeper_dict_get_create(&decrypting->msgs, event_id, NULL, &was_created, NULL);
+        if(was_created) {
+            char * ciphertext = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(content, "ciphertext"));
+            assert(ciphertext);
+
+            msg->ciphertext = beeper_asserting_strdup(ciphertext);
+        }
+
+        return NULL;
+    }
+
+    room_session_t * session = beeper_lru_get(&room_session_lru_class, room->session_lru, session_id);
+
+    if(!session) {
+        char * session_path = room_session_make_dirs_and_path(t, room, session_id);
+        char * pickle = beeper_read_text_file(session_path);
+        free(session_path);
+        if(pickle) {
+            room_session_lru_user_data_t lru_user_data = {.t = t, .room = room};
+            session = beeper_lru_add_unchecked(&room_session_lru_class, room->session_lru, NULL, &lru_user_data);
+            session->session_id = beeper_asserting_strdup(session_id);
+            session->pickle = beeper_asserting_strdup(pickle),
+            session->session = beeper_asserting_malloc(olm_inbound_group_session_size()),
+            session->needs_save = false,
+            olm_inbound_group_session(session->session);
+            /* destroys `pickle` */
+            size_t olmres = olm_unpickle_inbound_group_session(session->session, NULL, 0, pickle, strlen(pickle));
+            assert(olmres != olm_error());
+            free(pickle);
+        }
+    }
+
+    char * ciphertext = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(content, "ciphertext"));
+    assert(ciphertext);
+
+    if(session) {
+        char * ret = room_session_decrypt(session, ciphertext);
+        if(ret == NULL) {
+            debug("room_session_decrypt failed in room_decrypt_message: %s %s", room->room_id, room->name ? room->name : "(unnamed)");
+        }
+        return ret;
+    }
+
+    char * event_id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(encrypted_event, "event_id"));
+    assert(event_id);
+    char * sender_key = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(content, "sender_key"));
+    assert(sender_key);
+
+    decrypting = beeper_array_append(&room->decrypting, NULL);
+    decrypting->session_id = beeper_asserting_strdup(session_id);
+    decrypting->sender_key = beeper_asserting_strdup(sender_key);
+    decrypting->state = ROOM_DECRYPTING_STATE_BRIDGEBOT;
+    beeper_array_init(&decrypting->msgs, sizeof(room_decrypting_message_t));
+    room_decrypting_message_t * msg = beeper_array_append(&decrypting->msgs, NULL);
+    msg->message_id = beeper_asserting_strdup(event_id);
+    msg->ciphertext = beeper_asserting_strdup(ciphertext);
+    if(room->bridgebot) {
+        room_decrypting_continue_with_bridgebot(t, room, decrypting);
+    }
+
+    return NULL;
+}
+
+static void room_save_sessions(beeper_task_t * t, room_t * room)
+{
+    for(size_t i = 0; i < ARRAY_LEN(room->session_lru); i++) {
+        room_session_t * session = &room->session_lru[i];
+        if(!session->session_id) {
+            return;
+        }
+        room_session_save(t, room, session);
+    }
+}
+
+static void handle_room_key_event(beeper_task_t * t, beeper_array_t * room_dict, cJSON * to_device_json)
+{
+    char * event_type = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(to_device_json, "type"));
+    assert(event_type);
+    size_t (*import_func)(OlmInboundGroupSession *session, uint8_t const * session_key, size_t session_key_length);
+    if(0 == strcmp(event_type, "m.room_key")) {
+        import_func = olm_init_inbound_group_session;
+    }
+    else if(0 == strcmp(event_type, "m.forwarded_room_key")) {
+        import_func = olm_import_inbound_group_session;
+    }
+    else {
+        assert(0);
+    }
+
+    cJSON * content = unwrap_cjson(cJSON_GetObjectItemCaseSensitive(to_device_json, "content"));
+    char * algorithm = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(content, "algorithm"));
+    assert(algorithm);
+    if(0 != strcmp(algorithm, "m.megolm.v1.aes-sha2")) return;
+    char * room_id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(content, "room_id"));
+    assert(room_id);
+    char * session_id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(content, "session_id"));
+    assert(session_id);
+    char * session_key = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(content, "session_key"));
+    assert(session_key);
+
+    room_t * room = beeper_dict_get_create(room_dict, room_id, room_create, NULL, t);
+
+    room_decrypting_t * decrypting = beeper_dict_get(&room->decrypting, session_id);
+    if(decrypting) {
+
+        room_session_lru_user_data_t lru_user_data = {.t = t, .room = room};
+        room_session_t * session = beeper_lru_add_unchecked(&room_session_lru_class, room->session_lru, NULL, &lru_user_data);
+        session->session_id = decrypting->session_id; /* take ownership */
+        decrypting->session_id = NULL;
+        session->pickle = NULL;
+        session->session = beeper_asserting_malloc(olm_inbound_group_session_size());
+        olm_inbound_group_session(session->session);
+        char * session_key_buf = beeper_asserting_strdup(session_key);
+        size_t olmres = import_func(session->session, (uint8_t *) session_key_buf, strlen(session_key_buf));
+        assert(olmres != olm_error());
+        free(session_key_buf);
+        session->needs_save = true;
+
+        uint32_t msg_count = beeper_array_len(&decrypting->msgs);
+        room_decrypting_message_t * msgs = beeper_array_data(&decrypting->msgs);
+        for(uint32_t i = 0; i < msg_count; i++) {
+
+            char * text = room_session_decrypt(session, msgs[i].ciphertext);
+            if(text == NULL) {
+                debug("room_session_decrypt failed in handle_room_key_event: %s %s", room->room_id, room->name ? room->name : "(unnamed)");
+                break;
+            }
+
+            beeper_task_message_decrypted_t * decrypted_event = beeper_asserting_malloc(sizeof(*decrypted_event));
+            decrypted_event->room_id = beeper_asserting_strdup(room_id);
+            decrypted_event->message_id = msgs[i].message_id; /* take ownership */
+            msgs[i].message_id = NULL;
+            decrypted_event->text = text;
+
+            t->event_cb(BEEPER_TASK_EVENT_MESSAGE_DECRYPTED, decrypted_event, t->event_cb_user_data);
+
+        }
+
+        room_decrypting_destroy(decrypting, NULL);
+        beeper_array_remove_item(&room->decrypting, decrypting);
+
+        room_session_save(t, room, session);
+
+        return;
+    }
+
+    if(beeper_lru_get_no_rearrange(&room_session_lru_class, room->session_lru, session_id)) {
+        return;
+    }
+
+    char * session_path = room_session_make_path(t, room, session_id);
+    debug("open: '%s' RDONLY", session_path);
+    int fd = open(session_path, O_RDONLY);
+    free(session_path);
+    if(fd >= 0) {
+        int res = close(fd);
+        assert(res == 0);
+        return;
+    }
+    assert(errno == ENOENT);
+
+    room_session_lru_user_data_t lru_user_data = {.t = t, .room = room};
+    room_session_t * session = beeper_lru_add_unchecked(&room_session_lru_class, room->session_lru, NULL, &lru_user_data);
+    session->session_id = beeper_asserting_strdup(session_id);
+    session->pickle = NULL;
+    session->session = beeper_asserting_malloc(olm_inbound_group_session_size());
+    olm_inbound_group_session(session->session);
+    char * session_key_buf = beeper_asserting_strdup(session_key);
+    size_t olmres = import_func(session->session, (uint8_t *) session_key_buf, strlen(session_key_buf));
+    assert(olmres != olm_error());
+    free(session_key_buf);
+    session->needs_save = true;
+
+    room_session_save(t, room, session);
+}
+
+static bool room_event_can_be_used_to_init_message_data(cJSON * room_event)
+{
+    cJSON * content;
+    char * type;
+    char * algorithm;
+    return (content = cJSON_GetObjectItemCaseSensitive(room_event, "content"))
+            && (type = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(room_event, "type")))
+            && ((
+                    0 == strcmp(type, "m.room.encrypted")
+                    && (algorithm = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(content, "algorithm")))
+                    && 0 == strcmp(algorithm, "m.megolm.v1.aes-sha2")
+                    && cJSON_IsString(cJSON_GetObjectItemCaseSensitive(content, "session_id"))
+                    && cJSON_IsString(cJSON_GetObjectItemCaseSensitive(content, "ciphertext"))
+                    && cJSON_IsString(cJSON_GetObjectItemCaseSensitive(content, "sender_key"))
+                )
+                || (
+                    0 == strcmp(type, "m.room.message")
+                    && cJSON_IsString(cJSON_GetObjectItemCaseSensitive(content, "body"))
+                )
+            )
+            && cJSON_IsString(cJSON_GetObjectItemCaseSensitive(room_event, "event_id"))
+            && cJSON_IsString(cJSON_GetObjectItemCaseSensitive(room_event, "sender"))
+            && cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(room_event, "origin_server_ts"))
+    ;
 }
 
 static void event_data_message_init_from_room_event(
-    beeper_task_t * t, beeper_task_event_data_message_t * el, cJSON * room_event)
+    beeper_task_t * t, room_t * room, beeper_task_event_data_message_t * el, cJSON * room_event)
 {
     char * event_id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(room_event, "event_id"));
     assert(event_id);
     el->message_id = beeper_asserting_strdup(event_id);
-    char * body = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(room_event, "content"), "body"));
-    assert(body);
-    el->text = beeper_asserting_strdup(body);
+    cJSON * content = cJSON_GetObjectItemCaseSensitive(room_event, "content");
+    assert(cJSON_IsObject(content));
+    cJSON * body = cJSON_GetObjectItemCaseSensitive(content, "body");
+    if(body) {
+        assert(cJSON_IsString(body));
+        el->text = beeper_asserting_strdup(cJSON_GetStringValue(body));
+    }
+    else {
+        el->text = room_decrypt_message(t, room, room_event);
+    }
     char * sender = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(room_event, "sender"));
     assert(sender);
     el->member = 0 == strcmp(sender, t->user_id) ? BEEPER_TASK_MEMBER_YOU : BEEPER_TASK_MEMBER_THEM;
-    cJSON * origin_server_ts = cJSON_GetObjectItemCaseSensitive(room_event, "origin_server_ts");
-    assert(cJSON_IsNumber(origin_server_ts));
+    double origin_server_ts = unwrap_number(cJSON_GetObjectItemCaseSensitive(room_event, "origin_server_ts"));
     /* casting double to uint64_t */
-    el->timestamp = cJSON_GetNumberValue(origin_server_ts);
+    el->timestamp = origin_server_ts;
 }
 
 static void received_event_data_destroy(const beeper_task_queue_item_t * queue_item)
@@ -1479,7 +2424,7 @@ static void sas_process_peer_mac_and_send_done(
     char * key_list_mac = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(sas_peer_mac_content, "keys"));
     assert(key_list_mac);
 
-    assert(0 == strncmp(mac, key_list_mac, mac_len));
+    assert(mac_len == strlen(key_list_mac) && 0 == memcmp(mac, key_list_mac, mac_len));
 
     key_list_user_t * user;
     key_list_device_t * peer_device;
@@ -1529,7 +2474,7 @@ static void sas_process_peer_mac_and_send_done(
 
         free(info);
 
-        assert(0 == strncmp(mac, key_macs[i], mac_len));
+        assert(mac_len == strlen(key_macs[i]) && 0 == memcmp(mac, key_macs[i], mac_len));
     }
 
     free(mac);
@@ -1551,7 +2496,7 @@ static void sas_process_peer_mac_and_send_done(
     ));
 
     char path[SENDTODEVICE_PATH_SIZE("m.key.verification.done") + 1];
-    sprintf(path, SENDTODEVICE_PATH_FMT("m.key.verification.done"), txnid_next(t));
+    snprintf(path, sizeof(path), SENDTODEVICE_PATH_FMT("m.key.verification.done"), txnid_next(t));
 
     request(&t->https_conn[0], "PUT", path, t->auth_header, req_json_str, false);
 
@@ -1569,6 +2514,7 @@ static void * thread(void * arg)
 
     txnid_init(t);
 
+    debug("open: '"BEEPER_RANDOM_PATH"' RDONLY");
     t->rng_fd = open(BEEPER_RANDOM_PATH, O_RDONLY);
     assert(t->rng_fd != -1);
 
@@ -1625,7 +2571,8 @@ static void * thread(void * arg)
             t->device_id = device_id;
         }
         else {
-            int fd = open(device_id_path, O_WRONLY | O_EXCL | O_CREAT, 0644);
+            debug("open: '%s' WRONLY EXCL CREAT", device_id_path);
+            int fd = open(device_id_path, O_WRONLY | O_EXCL | O_CREAT, 0666);
             assert(fd != -1);
             ssize_t device_id_len = strlen(resp_device_id);
             ssize_t bw = write(fd, resp_device_id, device_id_len);
@@ -1692,35 +2639,8 @@ static void * thread(void * arg)
     beeper_task_device_key_status_t device_key_status_res = device_key_status(t);
 
     if(device_key_status_res == BEEPER_TASK_DEVICE_KEY_STATUS_NOT_UPLOADED) {
-        cJSON * one_time_keys_json = get_n_one_time_keys(t, ONE_TIME_KEY_COUNT_TARGET);
+        cJSON * upload_keys_json = get_n_one_time_keys(t, ONE_TIME_KEY_COUNT_TOPUP);
 
-        size_t fallback_key_length = olm_account_unpublished_fallback_key_length(t->olm_account);
-        char * fallback_key = malloc(fallback_key_length);
-        assert(fallback_key);
-        olm_res = olm_account_unpublished_fallback_key(t->olm_account, fallback_key, fallback_key_length);
-        assert(olm_res == fallback_key_length);
-        cJSON * fallback_key_json = cJSON_ParseWithLength(fallback_key, fallback_key_length);
-        free(fallback_key);
-        if(cJSON_GetObjectItemCaseSensitive(fallback_key_json, "curve25519")->child == NULL) {
-            cJSON_Delete(fallback_key_json);
-
-            size_t random_length = olm_account_generate_fallback_key_random_length(t->olm_account);
-            void * random = gen_random(t->rng_fd, random_length);
-            olm_res = olm_account_generate_fallback_key(t->olm_account, random, random_length);
-            assert(olm_res == 1);
-            free(random);
-
-            fallback_key_length = olm_account_unpublished_fallback_key_length(t->olm_account);
-            fallback_key = malloc(fallback_key_length);
-            assert(fallback_key);
-            olm_res = olm_account_unpublished_fallback_key(t->olm_account, fallback_key, fallback_key_length);
-            assert(olm_res == fallback_key_length);
-            fallback_key_json = cJSON_ParseWithLength(fallback_key, fallback_key_length);
-            free(fallback_key);
-            assert(cJSON_GetObjectItemCaseSensitive(fallback_key_json, "curve25519")->child != NULL);
-        }
-
-        cJSON * upload_keys_json = unwrap_cjson(cJSON_CreateObject());
         {
             cJSON * device_keys = unwrap_cjson(cJSON_CreateObject());
             cJSON_AddItemToObjectCS(upload_keys_json, "device_keys", device_keys);
@@ -1751,53 +2671,11 @@ static void * thread(void * arg)
 
             cJSON_AddItemToObjectCS(device_keys, "signatures", sign_json(t, device_keys));
         }
-        {
-            cJSON * fallback_keys = unwrap_cjson(cJSON_CreateObject());
-            cJSON_AddItemToObjectCS(upload_keys_json, "fallback_keys", fallback_keys);
-
-            cJSON * key_item = cJSON_GetObjectItemCaseSensitive(fallback_key_json, "curve25519")->child;
-
-            cJSON * fallback_key_entry = unwrap_cjson(cJSON_CreateObject());
-            char * entry_name;
-            assert(-1 != asprintf(&entry_name, "signed_curve25519:%s", key_item->string));
-            assert(cJSON_AddItemToObject(fallback_keys, entry_name, fallback_key_entry));
-            free(entry_name);
-
-            cJSON_AddItemToObjectCS(fallback_key_entry, "fallback", unwrap_cjson(cJSON_CreateTrue()));
-
-            cJSON_AddItemToObjectCS(fallback_key_entry, "key", unwrap_cjson(cJSON_CreateStringReference(
-                cJSON_GetStringValue(key_item))));
-
-            cJSON_AddItemToObjectCS(fallback_key_entry, "signatures", sign_json(t, fallback_key_entry));
-        }
-        {
-            cJSON * one_time_keys = unwrap_cjson(cJSON_CreateObject());
-            cJSON_AddItemToObjectCS(upload_keys_json, "one_time_keys", one_time_keys);
-
-            cJSON * key_items = cJSON_GetObjectItemCaseSensitive(one_time_keys_json, "curve25519");
-            cJSON * item;
-            cJSON_ArrayForEach(item, key_items) {
-                cJSON * otk_entry = unwrap_cjson(cJSON_CreateObject());
-                char * entry_name;
-                assert(-1 != asprintf(&entry_name, "signed_curve25519:%s", item->string));
-                assert(cJSON_AddItemToObject(one_time_keys, entry_name, otk_entry));
-                free(entry_name);
-
-                cJSON_AddItemToObjectCS(otk_entry, "key", unwrap_cjson(cJSON_CreateStringReference(
-                    cJSON_GetStringValue(item))));
-
-                cJSON_AddItemToObjectCS(otk_entry, "signatures", sign_json(t, otk_entry));
-            }
-        }
 
         char * upload_keys_json_str = cJSON_PrintUnformatted(upload_keys_json);
         assert(upload_keys_json_str);
 
         cJSON_Delete(upload_keys_json);
-        cJSON_Delete(fallback_key_json);
-        cJSON_Delete(one_time_keys_json);
-
-        pickle_account(t);
 
         request(&t->https_conn[0], "POST", "keys/upload",
                                   t->auth_header, upload_keys_json_str, false);
@@ -1941,7 +2819,7 @@ static void * thread(void * arg)
                     free(device_key_ed25519_id);
 
                     char path[SENDTODEVICE_PATH_SIZE("m.key.verification.mac") + 1];
-                    sprintf(path, SENDTODEVICE_PATH_FMT("m.key.verification.mac"), txnid_next(t));
+                    snprintf(path, sizeof(path), SENDTODEVICE_PATH_FMT("m.key.verification.mac"), txnid_next(t));
 
                     request(&t->https_conn[0], "PUT", path, t->auth_header, req_json_str, false);
 
@@ -1967,6 +2845,10 @@ static void * thread(void * arg)
             }
             else if(e == BEEPER_TASK_RECEIVED_EVENT_REQUEST_MESSAGES) {
                 beeper_received_message_request_t * msgs_req_ev = queue_item.data;
+
+                bool was_created;
+                room_t * room = beeper_dict_get_create(&room_dict, msgs_req_ev->room_id, room_create, &was_created, t);
+                assert(!was_created);
 
                 char * path;
                 if(msgs_req_ev->chunk_id) {
@@ -1994,9 +2876,7 @@ static void * thread(void * arg)
                 uint32_t message_count = 0;
                 cJSON * chunk_item;
                 cJSON_ArrayForEach(chunk_item, chunk) {
-                    char * type = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(chunk_item, "type"));
-                    assert(type);
-                    if(0 == strcmp(type, "m.room.message")) {
+                    if(room_event_can_be_used_to_init_message_data(chunk_item)) {
                         message_count += 1;
                     }
                 }
@@ -2018,12 +2898,11 @@ static void * thread(void * arg)
 
                 uint32_t i = 0;
                 cJSON_ArrayForEach(chunk_item, chunk) {
-                    char * type = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(chunk_item, "type"));
-                    if(0 != strcmp(type, "m.room.message")) {
+                    if(!room_event_can_be_used_to_init_message_data(chunk_item)) {
                         continue;
                     }
 
-                    event_data_message_init_from_room_event(t, &msgs_resp_event->messages[i], chunk_item);
+                    event_data_message_init_from_room_event(t, room, &msgs_resp_event->messages[i], chunk_item);
 
                     i++;
                 }
@@ -2031,6 +2910,8 @@ static void * thread(void * arg)
                 cJSON_Delete(msgs_json);
 
                 t->event_cb(BEEPER_TASK_EVENT_ROOM_MESSAGES, msgs_resp_event, t->event_cb_user_data);
+
+                room_save_sessions(t, room);
             }
             else assert(0);
 
@@ -2076,6 +2957,34 @@ static void * thread(void * arg)
                     assert(json_next(&pdjson) == JSON_STRING);
                     assert(!next_batch);
                     next_batch = beeper_asserting_strdup(json_get_string(&pdjson, NULL));
+                }
+                else if(0 == strcmp("device_one_time_keys_count", object_key_string)) {
+                    assert(JSON_OBJECT == json_next(&pdjson));
+                    while(while_object(&pdjson, &object_key_string)) {
+                        if(0 == strcmp("signed_curve25519", object_key_string)) {
+                            assert(JSON_NUMBER == json_next(&pdjson));
+                            int remaining_otks = json_get_number(&pdjson); /* cast double to int */
+                            debug("one-time key count: %d", remaining_otks);
+
+                            if(remaining_otks < ONE_TIME_KEY_COUNT_LOW_WATERMARK) {
+                                cJSON * upload_keys_json = get_n_one_time_keys(t, ONE_TIME_KEY_COUNT_TOPUP - remaining_otks);
+
+                                char * upload_keys_json_str = cJSON_PrintUnformatted(upload_keys_json);
+                                assert(upload_keys_json_str);
+                                cJSON_Delete(upload_keys_json);
+
+                                request(&t->https_conn[0], "POST", "keys/upload", t->auth_header, upload_keys_json_str, false);
+                                free(upload_keys_json_str);
+
+                                olm_account_mark_keys_as_published(t->olm_account);
+                                pickle_account(t);
+                            }
+
+                            exit_datastructure(&pdjson);
+                            break;
+                        }
+                        else assert(JSON_ERROR != json_skip(&pdjson));
+                    }
                 }
                 else if(0 == strcmp("device_lists", object_key_string)) {
                     assert(JSON_OBJECT == json_peek(&pdjson));
@@ -2124,8 +3033,7 @@ static void * thread(void * arg)
                                         }
                                     }
                                     if(!has_sas_method) goto denied;
-                                    double timestamp = cJSON_GetNumberValue(cJSON_GetObjectItemCaseSensitive(content, "timestamp"));
-                                    assert(!isnan(timestamp));
+                                    double timestamp = unwrap_number(cJSON_GetObjectItemCaseSensitive(content, "timestamp"));
                                     struct timespec ts;
                                     assert(0 == clock_gettime(CLOCK_REALTIME, &ts));
                                     double ms_now = ts.tv_sec;
@@ -2140,7 +3048,7 @@ static void * thread(void * arg)
                                     char * from_device = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(content, "from_device"));
                                     assert(from_device);
                                     char path[SENDTODEVICE_PATH_SIZE("m.key.verification.ready") + 1];
-                                    sprintf(path, SENDTODEVICE_PATH_FMT("m.key.verification.ready"), txnid_next(t));
+                                    snprintf(path, sizeof(path), SENDTODEVICE_PATH_FMT("m.key.verification.ready"), txnid_next(t));
                                     char * req_json_str;
                                     assert(-1 != asprintf(&req_json_str,
                                         "{"
@@ -2243,7 +3151,7 @@ static void * thread(void * arg)
                                     char path[MAX(SENDTODEVICE_PATH_SIZE("m.key.verification.accept"),
                                                   SENDTODEVICE_PATH_SIZE("m.key.verification.key")) + 1];
 
-                                    sprintf(path, SENDTODEVICE_PATH_FMT("m.key.verification.accept"), txnid_next(t));
+                                    snprintf(path, sizeof(path), SENDTODEVICE_PATH_FMT("m.key.verification.accept"), txnid_next(t));
                                     char * req_json_str;
                                     assert(-1 != asprintf(&req_json_str,
                                         "{"
@@ -2270,7 +3178,7 @@ static void * thread(void * arg)
                                     free(req_json_str);
                                     free(commitment);
 
-                                    sprintf(path, SENDTODEVICE_PATH_FMT("m.key.verification.key"), txnid_next(t));
+                                    snprintf(path, sizeof(path), SENDTODEVICE_PATH_FMT("m.key.verification.key"), txnid_next(t));
                                     assert(-1 != asprintf(&req_json_str,
                                         "{"
                                             "\"messages\":{"
@@ -2384,6 +3292,35 @@ static void * thread(void * arg)
                                     sas_step = SAS_STEP_END;
                                     denied:
                                 }
+                                else if(0 == strcmp(type, "m.room.encrypted")) {
+                                    __label__ denied;
+                                    char * algorithm = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(content, "algorithm"));
+                                    if(!algorithm || 0 != strcmp(algorithm, "m.olm.v1.curve25519-aes-sha2")) goto denied;
+                                    cJSON * ciphertext_mapping = unwrap_cjson(cJSON_GetObjectItemCaseSensitive(content, "ciphertext"));
+                                    cJSON * ciphertext_info = cJSON_GetObjectItemCaseSensitive(ciphertext_mapping, identity_key_curve25519);
+                                    if(!ciphertext_info) goto denied;
+                                    char * ciphertext = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(ciphertext_info, "body"));
+                                    assert(ciphertext);
+                                    double type = unwrap_number(cJSON_GetObjectItemCaseSensitive(ciphertext_info, "type"));
+                                    assert(type == 0.0 || type == 1.0);
+                                    char * sender_key = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(content, "sender_key"));
+                                    assert(sender_key);
+                                    cJSON * olm_payload = decrypt(t, ciphertext, type, sender, sender_key);
+                                    if(olm_payload == NULL) {
+                                        debug("decrypt failed on m.room.encrypted event");
+                                        goto denied;
+                                    }
+                                    char * event_type = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(olm_payload, "type"));
+                                    assert(event_type);
+                                    if(0 == strcmp(event_type, "m.room_key") || 0 == strcmp(event_type, "m.forwarded_room_key")) {
+                                        handle_room_key_event(t, &room_dict, olm_payload);
+                                    }
+                                    cJSON_Delete(olm_payload);
+                                    denied:
+                                }
+                                else {
+                                    debug("unhandled to-device message: %.*s", len, capture);
+                                }
                                 cJSON_Delete(to_device_event);
                             }
                             json_next(&pdjson);
@@ -2398,8 +3335,7 @@ static void * thread(void * arg)
                             assert(json_next(&pdjson) == JSON_OBJECT);
                             while(while_object(&pdjson, &object_key_string)) {
                                 debug("room: %s", object_key_string);
-                                room_t * room = beeper_dict_get_create(&room_dict, object_key_string, room_create, &was_created);
-                                if(was_created) room_title_event_send(t, object_key_string, object_key_string);
+                                room_t * room = beeper_dict_get_create(&room_dict, object_key_string, room_create, NULL, t);
                                 assert(JSON_OBJECT == json_next(&pdjson));
                                 while(while_object(&pdjson, &object_key_string)) {
                                     matrix_joined_room_t joined_room_obj_type = MATRIX_JOINED_ROOM_NULL;
@@ -2429,6 +3365,8 @@ static void * thread(void * arg)
                                                             else if(0 == strcmp("m.room.canonical_alias", type_string)) event_type = MATRIX_EVENT_TYPE_M_ROOM_CANONICAL_ALIAS;
                                                             else if(0 == strcmp("m.room.name", type_string)) event_type = MATRIX_EVENT_TYPE_M_ROOM_NAME;
                                                             else if(0 == strcmp("m.room.message", type_string)) event_type = MATRIX_EVENT_TYPE_M_ROOM_MESSAGE;
+                                                            else if(0 == strcmp("m.room.encrypted", type_string)) event_type = MATRIX_EVENT_TYPE_M_ROOM_ENCRYPTED;
+                                                            else if(0 == strcmp("m.bridge", type_string)) event_type = MATRIX_EVENT_TYPE_M_BRIDGE;
                                                             room_name_type_t room_event_name_type = ROOM_NAME_TYPE_NULL;
                                                             switch(room->name_type) {
                                                                 case ROOM_NAME_TYPE_MEMBERS:
@@ -2453,7 +3391,9 @@ static void * thread(void * arg)
                                                                     break;
                                                             }
                                                             bool should_capture = room_event_name_type != ROOM_NAME_TYPE_NULL
-                                                                                  || event_type == MATRIX_EVENT_TYPE_M_ROOM_MESSAGE;
+                                                                                  || event_type == MATRIX_EVENT_TYPE_M_ROOM_MESSAGE
+                                                                                  || event_type == MATRIX_EVENT_TYPE_M_ROOM_ENCRYPTED
+                                                                                  || event_type == MATRIX_EVENT_TYPE_M_BRIDGE;
                                                             if(!should_capture) {
                                                                 sd.capturing = false;
                                                             }
@@ -2461,7 +3401,7 @@ static void * thread(void * arg)
                                                             if(should_capture) {
                                                                 len = json_get_position(&pdjson) - start;
                                                                 capture = stream_data_get_capture(&sd, start, len);
-                                                                debug("%.*s", len, capture);
+                                                                debug("capture: %.*s", len, capture);
                                                                 cJSON * room_event = unwrap_cjson(cJSON_ParseWithLength(capture, len));
                                                                 if(room_event_name_type != ROOM_NAME_TYPE_NULL) {
                                                                     cJSON * content = unwrap_cjson(cJSON_GetObjectItemCaseSensitive(
@@ -2477,7 +3417,7 @@ static void * thread(void * arg)
                                                                             assert(user_id);
                                                                             char * display_name = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(
                                                                                 content, "displayname"));
-                                                                            room_member_t * room_member = beeper_dict_get_create(&room->members, user_id, room_member_create, &was_created);
+                                                                            room_member_t * room_member = beeper_dict_get_create(&room->members, user_id, room_member_create, &was_created, NULL);
                                                                             bool display_name_unchanged = !was_created && ((display_name == NULL && room_member->display_name == NULL)
                                                                                                                         || (display_name && room_member->display_name && 0 == strcmp(display_name, room_member->display_name)));
                                                                             if(!display_name_unchanged) {
@@ -2526,27 +3466,43 @@ static void * thread(void * arg)
                                                                     else assert(0);
                                                                     if(room_event_name_type > ROOM_NAME_TYPE_MEMBERS && non_member_name_ok) {
                                                                         room_title_event_send(t, room->room_id, room->name);
-                                                                        beeper_dict_reset(&room->members, room_member_destroy);
+                                                                        beeper_dict_reset(&room->members, room_member_destroy, NULL);
                                                                         room->name_type = room_event_name_type;
                                                                     }
                                                                 }
-                                                                if(event_type == MATRIX_EVENT_TYPE_M_ROOM_MESSAGE) {
-                                                                    if(timeline_messages_event == NULL) {
-                                                                        timeline_messages_event = beeper_asserting_calloc(1, sizeof(*timeline_messages_event)
-                                                                                                                             + 1 * sizeof(timeline_messages_event->messages[0]));
-                                                                        timeline_messages_event->room_id = beeper_asserting_strdup(room->room_id);
-                                                                        timeline_messages_event->direction = BEEPER_TASK_DIRECTION_DOWN;
-                                                                        timeline_messages_event->message_count = 1;
+                                                                if(event_type == MATRIX_EVENT_TYPE_M_ROOM_MESSAGE || event_type == MATRIX_EVENT_TYPE_M_ROOM_ENCRYPTED) {
+                                                                    if(room_event_can_be_used_to_init_message_data(room_event)) {
+                                                                        if(timeline_messages_event == NULL) {
+                                                                            timeline_messages_event = beeper_asserting_calloc(1, sizeof(*timeline_messages_event)
+                                                                                                                                 + 1 * sizeof(timeline_messages_event->messages[0]));
+                                                                            timeline_messages_event->room_id = beeper_asserting_strdup(room->room_id);
+                                                                            timeline_messages_event->direction = BEEPER_TASK_DIRECTION_DOWN;
+                                                                            timeline_messages_event->message_count = 1;
+                                                                        }
+                                                                        else {
+                                                                            timeline_messages_event->message_count += 1;
+                                                                            timeline_messages_event = beeper_asserting_realloc(timeline_messages_event,
+                                                                                                                               sizeof(*timeline_messages_event)
+                                                                                                                               + timeline_messages_event->message_count
+                                                                                                                               * sizeof(timeline_messages_event->messages[0]));
+                                                                        }
+                                                                        beeper_task_event_data_message_t * message_element = &timeline_messages_event->messages[timeline_messages_event->message_count - 1];
+                                                                        event_data_message_init_from_room_event(t, room, message_element, room_event);
                                                                     }
-                                                                    else {
-                                                                        timeline_messages_event->message_count += 1;
-                                                                        timeline_messages_event = beeper_asserting_realloc(timeline_messages_event,
-                                                                                                                           sizeof(*timeline_messages_event)
-                                                                                                                           + timeline_messages_event->message_count
-                                                                                                                           * sizeof(timeline_messages_event->messages[0]));
+                                                                }
+                                                                else if(event_type == MATRIX_EVENT_TYPE_M_BRIDGE) {
+                                                                    char * bridgebot = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(room_event, "content"), "bridgebot"));
+                                                                    if(bridgebot && bridgebot[0]) {
+                                                                        free(room->bridgebot);
+                                                                        room->bridgebot = beeper_asserting_strdup(bridgebot);
+                                                                        uint32_t room_decrypting_count = beeper_array_len(&room->decrypting);
+                                                                        room_decrypting_t * room_decrypting = beeper_array_data(&room->decrypting);
+                                                                        for(uint32_t i = 0; i < room_decrypting_count; i++) {
+                                                                            if(room_decrypting[i].state == ROOM_DECRYPTING_STATE_BRIDGEBOT) {
+                                                                                room_decrypting_continue_with_bridgebot(t, room, &room_decrypting[i]);
+                                                                            }
+                                                                        }
                                                                     }
-                                                                    beeper_task_event_data_message_t * message_element = &timeline_messages_event->messages[timeline_messages_event->message_count - 1];
-                                                                    event_data_message_init_from_room_event(t, message_element, room_event);
                                                                 }
                                                                 cJSON_Delete(room_event);
                                                             }
@@ -2563,12 +3519,12 @@ static void * thread(void * arg)
                                             timeline_messages_event->next_chunk_id = timeline_prev_batch; /* take ownership */
                                             timeline_prev_batch = NULL;
                                             t->event_cb(BEEPER_TASK_EVENT_ROOM_MESSAGES, timeline_messages_event, t->event_cb_user_data);
+                                            room_save_sessions(t, room);
                                         }
                                         free(timeline_prev_batch);
                                     }
                                     else assert(JSON_ERROR != json_skip(&pdjson));
                                 }
-                                debug("");
                             }
                         }
                         else assert(JSON_ERROR != json_skip(&pdjson));
@@ -2606,7 +3562,7 @@ static void * thread(void * arg)
         assert(res > 0);
     }
 
-    beeper_dict_destroy(&room_dict, room_destroy);
+    beeper_dict_destroy(&room_dict, room_destroy, t);
 
     cJSON_Delete(sas_peer_mac_content);
     if(sas_olm_sas) olm_clear_sas(sas_olm_sas);
