@@ -11,6 +11,7 @@ typedef enum {
     TEXTER_UI_EVENT_BUBBLE_LOAD,
     TEXTER_UI_EVENT_BUBBLE_UNLOAD,
     TEXTER_UI_EVENT_QUIT,
+    TEXTER_UI_EVENT_SEND_TEXT,
 } texter_ui_event_type_t;
 
 typedef enum {
@@ -36,10 +37,12 @@ void * texter_ui_convo_get_user_data(texter_ui_convo_t * convo);
 void texter_ui_convo_delete(texter_ui_convo_t * convo);
 void texter_ui_convo_set_title(texter_ui_convo_t * convo, const char * text);
 void texter_ui_convo_set_menu_position(texter_ui_convo_t * convo, int32_t position);
+void texter_ui_convo_set_sending_enabled(texter_ui_convo_t * convo, bool enabled);
 
 texter_ui_future_t * texter_ui_event_get_future(texter_ui_event_t * e);
 texter_ui_convo_t * texter_ui_event_get_convo(texter_ui_event_t * e);
 texter_ui_side_t texter_ui_event_get_side(texter_ui_event_t * e);
+const char * texter_ui_event_get_text(texter_ui_event_t * e);
 
 void texter_ui_future_set_user_data(texter_ui_future_t * fut, void * user_data);
 void * texter_ui_future_get_user_data(texter_ui_future_t * fut);

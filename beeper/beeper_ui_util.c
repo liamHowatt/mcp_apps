@@ -48,6 +48,7 @@ static ui_room_t * room_get_create(beeper_ui_t * c, const char * room_id)
         beeper_ll_list_add_bottom(&c->room_list, (beeper_ll_t *) room);
         room->room_id = beeper_asserting_strdup(room_id);
         room->x_convo = texter_ui_convo_create(c->x, room);
+        texter_ui_convo_set_sending_enabled(room->x_convo, false);
     }
     return room;
 }
@@ -379,6 +380,12 @@ static void queue_poll_cb(mcp_lvgl_poll_t * handle, int fd, uint32_t revents, vo
                 beeper_task_event_data_destroy(item.e, item.event_data);
                 break;
             }
+            case BEEPER_TASK_EVENT_SENDING_ALLOWED:
+                char * room_id = item.event_data;
+                ui_room_t * room = room_get_create(c, room_id);
+                texter_ui_convo_set_sending_enabled(room->x_convo, true);
+                free(item.event_data);
+                break;
             default:
                 beeper_task_event_data_destroy(item.e, item.event_data);
         }
@@ -421,6 +428,7 @@ static void texter_event_cb(texter_ui_t * x, texter_ui_event_type_t type, texter
     switch(type) {
         case TEXTER_UI_EVENT_BUBBLE_LOAD:
         case TEXTER_UI_EVENT_BUBBLE_UNLOAD:
+        case TEXTER_UI_EVENT_SEND_TEXT:
             break;
         case TEXTER_UI_EVENT_QUIT:
             lv_obj_delete(lv_obj_get_parent(c->x_obj));
@@ -433,6 +441,7 @@ static void texter_event_cb(texter_ui_t * x, texter_ui_event_type_t type, texter
     ui_room_t * room = texter_ui_convo_get_user_data(x_convo);
     texter_ui_side_t side = texter_ui_event_get_side(e);
     texter_ui_future_t * fut = texter_ui_event_get_future(e);
+    const char * text = texter_ui_event_get_text(e);
 
     switch(type) {
         case TEXTER_UI_EVENT_BUBBLE_LOAD:
@@ -539,6 +548,9 @@ static void texter_event_cb(texter_ui_t * x, texter_ui_event_type_t type, texter
                     }
                 }
             }
+            break;
+        case TEXTER_UI_EVENT_SEND_TEXT:
+            beeper_task_send_text(c->task, room->room_id, text);
             break;
         default:
             break;

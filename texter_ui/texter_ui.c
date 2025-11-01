@@ -61,12 +61,14 @@ struct texter_ui_convo_t {
     lv_subject_t title_subject;
     lv_obj_t * menuitem;
     ll_t bubble_list;
+    bool sending_disabled;
 };
 
 struct texter_ui_event_t {
     future_t * fut;
     texter_ui_convo_t * convo;
     texter_ui_side_t side;
+    const char * text;
 };
 
 /**********************
@@ -83,6 +85,7 @@ static void update_bubble(lv_obj_t * bubble, const char * message,
                           texter_ui_member_t member);
 static lv_obj_t * create_view(lv_obj_t * parent);
 static void convo_back_btn_clicked_cb(lv_event_t * e);
+static void convo_send_btn_clicked_cb(lv_event_t * e);
 static void convo_menuitem_clicked_cb(lv_event_t * e);
 static void event_timer_cb(lv_timer_t * event_timer);
 static void scroll_event_cb(lv_event_t * e);
@@ -267,6 +270,23 @@ void texter_ui_convo_set_menu_position(texter_ui_convo_t * convo, int32_t positi
     lv_obj_move_to_index(convo->menuitem, position);
 }
 
+void texter_ui_convo_set_sending_enabled(texter_ui_convo_t * convo, bool enabled)
+{
+    convo->sending_disabled = !enabled;
+
+    texter_ui_t * x = convo->x;
+
+    if(convo != x->active_convo) {
+        return;
+    }
+
+    lv_obj_t * view = lv_obj_get_child(x->base_obj, 1);
+    lv_obj_t * compose_bar = lv_obj_get_child(view, 2);
+    lv_obj_t * compose_ta = lv_obj_get_child(compose_bar, 0);
+
+    lv_obj_set_state(compose_ta, LV_STATE_DISABLED, !enabled);
+}
+
 texter_ui_future_t * texter_ui_event_get_future(texter_ui_event_t * e)
 {
     return e->fut;
@@ -280,6 +300,11 @@ texter_ui_convo_t * texter_ui_event_get_convo(texter_ui_event_t * e)
 texter_ui_side_t texter_ui_event_get_side(texter_ui_event_t * e)
 {
     return e->side;
+}
+
+const char * texter_ui_event_get_text(texter_ui_event_t * e)
+{
+    return e->text;
 }
 
 void texter_ui_future_set_user_data(texter_ui_future_t * fut, void * user_data)
@@ -467,6 +492,29 @@ static void convo_back_btn_clicked_cb(lv_event_t * e)
     event_enqueue(x, fut, TEXTER_UI_EVENT_BUBBLE_LOAD, TEXTER_UI_SIDE_TOP);
 }
 
+static void convo_send_btn_clicked_cb(lv_event_t * e)
+{
+    texter_ui_convo_t * convo = lv_event_get_user_data(e);
+    texter_ui_t * x = convo->x;
+
+    if(x->active_convo != convo || convo->sending_disabled) {
+        return;
+    }
+
+    lv_obj_t * view = lv_obj_get_child(x->base_obj, 1);
+    lv_obj_t * compose_bar = lv_obj_get_child(view, 2);
+    lv_obj_t * compose_ta = lv_obj_get_child(compose_bar, 0);
+
+    const char * text_to_send = lv_textarea_get_text(compose_ta);
+    texter_ui_event_t ev = {
+        .convo = convo,
+        .text = text_to_send,
+    };
+    x->event_cb(x, TEXTER_UI_EVENT_SEND_TEXT, &ev);
+
+    lv_textarea_set_text(compose_ta, "");
+}
+
 static void convo_menuitem_clicked_cb(lv_event_t * e)
 {
     texter_ui_convo_t * convo = lv_event_get_user_data(e);
@@ -495,6 +543,18 @@ static void convo_menuitem_clicked_cb(lv_event_t * e)
     lv_obj_t * bubble_area = lv_obj_get_child(view, 1);
     lv_obj_set_flex_flow(bubble_area, LV_FLEX_FLOW_COLUMN);
     lv_obj_add_event_cb(bubble_area, scroll_event_cb, LV_EVENT_SCROLL, x);
+    lv_obj_t * compose_bar = lv_obj_create(view);
+    lv_obj_set_flex_flow(compose_bar, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(compose_bar, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_size(compose_bar, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_t * compose_ta = lv_textarea_create(compose_bar);
+    lv_obj_set_flex_grow(compose_ta, 1);
+    lv_obj_set_height(compose_ta, 50);
+    if(convo->sending_disabled) lv_obj_add_state(compose_ta, LV_STATE_DISABLED);
+    lv_obj_t * send_btn = lv_image_create(compose_bar);
+    lv_image_set_src(send_btn, LV_SYMBOL_GPS);
+    lv_obj_add_flag(send_btn, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(send_btn, convo_send_btn_clicked_cb, LV_EVENT_CLICKED, convo);
 
     ll_t * link = list_top(&convo->bubble_list);
 
@@ -522,10 +582,11 @@ static void event_timer_cb(lv_timer_t * event_timer) {
 
         link_remove(event_link);
 
-        texter_ui_event_t e;
-        e.fut = fut;
-        e.convo = fut->convo;
-        e.side = fut->event_side;
+        texter_ui_event_t e = {
+            .fut = fut,
+            .convo = fut->convo,
+            .side = fut->event_side,
+        };
 
         x->event_cb(x, fut->event_type, &e);
         texter_ui_future_decref(fut);
