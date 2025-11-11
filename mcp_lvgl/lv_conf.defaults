@@ -4,8 +4,7 @@ LV_FS_DEFAULT_DRIVER_LETTER       'A'
 LV_FS_POSIX_LETTER                'A'
 LV_FS_POSIX_PATH                  "/"
 LV_LOG_PRINTF                     1
-LV_USE_STDLIB_MALLOC              LV_STDLIB_BUILTIN
-LV_MEM_SIZE                       (108 * 1024U)
+LV_USE_STDLIB_MALLOC              LV_STDLIB_CLIB
 LV_USE_STDLIB_STRING              LV_STDLIB_CLIB
 LV_USE_STDLIB_SPRINTF             LV_STDLIB_CLIB
 LV_USE_FILE_EXPLORER              1

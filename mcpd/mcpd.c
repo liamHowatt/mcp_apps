@@ -580,8 +580,8 @@ int mcpd_main(int argc, char *argv[])
 
     socket_sms_t s;
 
-    pin_socket_ctx_init(&s.s0.pin_soc, "/dev/mcp0_clk", "/dev/mcp0_dat", "/dev/timer0", SIGUSR1, master_sm_next_byte_cb);
-    pin_socket_ctx_init(&s.s1.pin_soc, "/dev/mcp1_clk", "/dev/mcp1_dat", "/dev/timer1", SIGUSR2, poller_sm_next_byte_cb);
+    pin_socket_ctx_init(&s.s0.pin_soc, "/dev/mcp0_clk", "/dev/mcp0_dat", "/dev/timer2", SIGUSR1, master_sm_next_byte_cb);
+    pin_socket_ctx_init(&s.s1.pin_soc, "/dev/mcp1_clk", "/dev/mcp1_dat", "/dev/timer3", SIGUSR2, poller_sm_next_byte_cb);
 
     do_write(&s.s0.pin_soc, 255); /* assign me a token */
     uint8_t my_token = do_read(&s.s0.pin_soc);

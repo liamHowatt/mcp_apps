@@ -112,6 +112,24 @@ static ll_t * list_link_down(ll_t * list, ll_t * link);
 
 static const char convo_default_title[] = "(untitled)";
 
+static const lv_style_const_prop_t focus_style_1_props[] = {
+    LV_STYLE_CONST_OUTLINE_COLOR(LV_COLOR_MAKE(0x21, 0x96, 0xF3)),
+    LV_STYLE_CONST_OUTLINE_WIDTH(2),
+    LV_STYLE_CONST_OUTLINE_PAD(1),
+    LV_STYLE_CONST_OUTLINE_OPA(LV_OPA_50),
+    LV_STYLE_CONST_PROPS_END
+};
+static LV_STYLE_CONST_INIT(focus_style_1, focus_style_1_props);
+
+static const lv_style_const_prop_t focus_style_2_props[] = {
+    LV_STYLE_CONST_BORDER_COLOR(LV_COLOR_MAKE(0x21, 0x96, 0xF3)),
+    LV_STYLE_CONST_BORDER_WIDTH(2),
+    // LV_STYLE_CONST_BORDER_PAD(0),
+    LV_STYLE_CONST_BORDER_OPA(LV_OPA_50),
+    LV_STYLE_CONST_PROPS_END
+};
+static LV_STYLE_CONST_INIT(focus_style_2, focus_style_2_props);
+
 /**********************
  *      MACROS
  **********************/
@@ -145,7 +163,14 @@ texter_ui_t * texter_ui_create(lv_obj_t * base_obj, texter_ui_event_cb_t event_c
     lv_image_set_src(quit_btn, LV_SYMBOL_CLOSE);
     lv_obj_add_flag(quit_btn, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(quit_btn, quit_btn_clicked_cb, LV_EVENT_CLICKED, x);
-    lv_obj_set_flex_flow(lv_obj_get_child(view, 1), LV_FLEX_FLOW_COLUMN);
+    lv_obj_add_style(quit_btn, &focus_style_1, LV_STATE_FOCUS_KEY);
+    lv_group_add_obj(lv_group_get_default(), quit_btn);
+    lv_obj_t * main_area = lv_obj_get_child(view, 1);
+    lv_obj_set_flex_flow(main_area, LV_FLEX_FLOW_COLUMN);
+    lv_gridnav_add(main_area, LV_GRIDNAV_CTRL_NONE);
+    lv_group_add_obj(lv_group_get_default(), main_area);
+
+    lv_group_focus_obj(main_area);
 
     return x;
 }
@@ -205,6 +230,8 @@ texter_ui_convo_t * texter_ui_convo_create(texter_ui_t * x, void * user_data)
     lv_obj_set_user_data(convo->menuitem, convo);
     lv_obj_set_flex_flow(convo->menuitem, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_size(convo->menuitem, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_group_remove_obj(convo->menuitem);
+    lv_obj_add_style(convo->menuitem, &focus_style_1, LV_STATE_FOCUS_KEY);
 
     lv_obj_t * title = lv_label_create(convo->menuitem);
     lv_label_set_long_mode(title, LV_LABEL_LONG_MODE_SCROLL_CIRCULAR);
@@ -464,7 +491,9 @@ static void convo_back_btn_clicked_cb(lv_event_t * e)
 
     x->active_convo = NULL;
     lv_obj_delete(lv_obj_get_child(x->base_obj, 1));
-    lv_obj_remove_flag(lv_obj_get_child(x->base_obj, 0), LV_OBJ_FLAG_HIDDEN);
+    lv_obj_t * convo_menu = lv_obj_get_child(x->base_obj, 0);
+    lv_obj_remove_flag(convo_menu, LV_OBJ_FLAG_HIDDEN);
+    lv_group_focus_obj(lv_obj_get_child(convo_menu, 1));
 
     ll_t * link;
     while((link = list_top(&convo->bubble_list))) {
@@ -540,9 +569,13 @@ static void convo_menuitem_clicked_cb(lv_event_t * e)
     lv_image_set_src(back_btn, LV_SYMBOL_LEFT);
     lv_obj_add_flag(back_btn, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(back_btn, convo_back_btn_clicked_cb, LV_EVENT_CLICKED, convo);
+    lv_obj_add_style(back_btn, &focus_style_1, LV_STATE_FOCUS_KEY);
+    lv_group_add_obj(lv_group_get_default(), back_btn);
     lv_obj_t * bubble_area = lv_obj_get_child(view, 1);
     lv_obj_set_flex_flow(bubble_area, LV_FLEX_FLOW_COLUMN);
     lv_obj_add_event_cb(bubble_area, scroll_event_cb, LV_EVENT_SCROLL, x);
+    lv_obj_add_style(bubble_area, &focus_style_2, LV_STATE_FOCUS_KEY);
+    lv_group_add_obj(lv_group_get_default(), bubble_area);
     lv_obj_t * compose_bar = lv_obj_create(view);
     lv_obj_set_flex_flow(compose_bar, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(compose_bar, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -550,11 +583,16 @@ static void convo_menuitem_clicked_cb(lv_event_t * e)
     lv_obj_t * compose_ta = lv_textarea_create(compose_bar);
     lv_obj_set_flex_grow(compose_ta, 1);
     lv_obj_set_height(compose_ta, 50);
+    lv_group_add_obj(lv_group_get_default(), compose_ta);
     if(convo->sending_disabled) lv_obj_add_state(compose_ta, LV_STATE_DISABLED);
     lv_obj_t * send_btn = lv_image_create(compose_bar);
     lv_image_set_src(send_btn, LV_SYMBOL_GPS);
     lv_obj_add_flag(send_btn, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(send_btn, convo_send_btn_clicked_cb, LV_EVENT_CLICKED, convo);
+    lv_obj_add_style(send_btn, &focus_style_1, LV_STATE_FOCUS_KEY);
+    lv_group_add_obj(lv_group_get_default(), send_btn);
+
+    lv_group_focus_obj(compose_ta);
 
     ll_t * link = list_top(&convo->bubble_list);
 

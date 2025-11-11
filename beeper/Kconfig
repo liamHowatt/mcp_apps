@@ -11,4 +11,16 @@ config MCP_APPS_BEEPER
                 Enable the Beeper App
 
 if MCP_APPS_BEEPER
+
+config MCP_APPS_BEEPER_APPDATA_PATH
+        string "Persisted data path"
+        default "/data"
+        ---help---
+                Path to persistent login credientials and cryptography state.
+                A sub directory called beeper will automatically be created there.
+
+config MCP_APPS_BEEPER_NETWORKING_THREAD_STACKSIZE
+        int "Beeper networking thread stack size"
+        default PTHREAD_STACK_DEFAULT
+
 endif

@@ -5,6 +5,7 @@
 #include "beeper_task.h"
 #include <pthread.h>
 #include <mcp/mcp_lvgl.h>
+#include <mcp/mcp_lvgl_common.h>
 #include <mcp/texter_ui.h>
 
 typedef struct ui_message_t ui_message_t;

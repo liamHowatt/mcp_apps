@@ -25,6 +25,8 @@ extern const m4_runtime_cb_array_t m4_runtime_lib_input[];
 #endif
 
 #ifdef CONFIG_MCP_APPS_MCP_LVGL
+#include <mcp/runtime_lvgl.h>
+#define M4_RUNTIME_LIB_ENTRY_LVGL runtime_lib_lvgl,
 extern const m4_runtime_cb_array_t m4_runtime_lib_mcp_lvgl[];
 #define M4_RUNTIME_LIB_ENTRY_MCP_LVGL m4_runtime_lib_mcp_lvgl,
 #else
@@ -38,6 +40,7 @@ extern const m4_runtime_cb_array_t m4_runtime_lib_malloc[];
     M4_RUNTIME_LIB_ENTRY_MCPD \
     M4_RUNTIME_LIB_ENTRY_SPI \
     M4_RUNTIME_LIB_ENTRY_INPUT \
+    M4_RUNTIME_LIB_ENTRY_LVGL \
     M4_RUNTIME_LIB_ENTRY_MCP_LVGL \
     m4_runtime_lib_unix, \
     m4_runtime_lib_malloc,

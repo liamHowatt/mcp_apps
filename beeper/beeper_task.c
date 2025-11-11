@@ -548,7 +548,12 @@ static bool cjson_array_has_string(cJSON * array, const char * string)
 
 static void https_ctx_init(beeper_task_https_ctx_t * ctx)
 {
+    // int res;
+
     assert(wolfSSL_Init() == SSL_SUCCESS);
+
+    // res = wolfSSL_Debugging_ON();
+    // assert(res == 0);
 
     ctx->wolfssl_ctx = wolfSSL_CTX_new(wolfTLSv1_2_client_method());
     assert(ctx->wolfssl_ctx);
@@ -608,13 +613,8 @@ static void https_set_blocking(beeper_task_https_conn_t * conn, bool blocking)
 
 static void https_conn_deinit(beeper_task_https_conn_t * conn)
 {
-    int res;
     int fd = https_fd(conn);
-    https_set_blocking(conn, true);
-    res = wolfSSL_shutdown(conn->wolfssl_ssl);
-    assert(res == SSL_SUCCESS || res == SSL_SHUTDOWN_NOT_DONE);
     wolfSSL_free(conn->wolfssl_ssl);
-    assert(0 == shutdown(fd, SHUT_RDWR));
     assert(0 == close(fd));
 }
 
@@ -640,8 +640,8 @@ static void dummy_read(WOLFSSL * wolfssl_ssl, int len)
     }
 }
 
-static void request_send(beeper_task_https_conn_t * conn, const char * method, const char * path,
-                         const char * extra_headers, const char * json_str)
+static bool request_send(beeper_task_https_conn_t * conn, const char * method, const char * path,
+                         const char * extra_headers, const char * json_str, bool allow_failure)
 {
     int res;
 
@@ -670,9 +670,12 @@ static void request_send(beeper_task_https_conn_t * conn, const char * method, c
 
     https_set_blocking(conn, true);
     res = wolfSSL_write(conn->wolfssl_ssl, req, req_len);
-    assert(res == req_len);
 
     free(req);
+
+    bool succeeded = res == req_len;
+    assert(succeeded || allow_failure);
+    return succeeded;
 }
 
 static int request_read_chunk_size(beeper_task_https_conn_t * conn)
@@ -823,19 +826,21 @@ static char * request(beeper_task_https_conn_t * conn, const char * method, cons
                       const char * extra_headers, const char * json_str, bool save_response)
 {
     int tries_left = REQUEST_RETRY_COUNT;
+    bool succeeded = true;
     while(1) {
-        request_send(conn, method, path, extra_headers, json_str);
-        char * resp = NULL;
-        bool read_succeeded = request_recv(conn, NULL, true, NULL, true, save_response ? &resp : NULL, true, NULL);
-        if(!read_succeeded) {
+        if(!succeeded) {
             assert(tries_left);
             debug("retrying request %d more time(s)", tries_left);
             tries_left -= 1;
             beeper_task_https_ctx_t * conn_ctx = conn->ctx;
             https_conn_deinit(conn);
             https_conn_init(conn_ctx, conn);
-            continue;
         }
+        succeeded = request_send(conn, method, path, extra_headers, json_str, true);
+        if(!succeeded) continue;
+        char * resp = NULL;
+        succeeded = request_recv(conn, NULL, true, NULL, true, save_response ? &resp : NULL, true, NULL);
+        if(!succeeded) continue;
         return resp;
     }
 }
@@ -2907,7 +2912,7 @@ static void * thread(void * arg)
     t->event_cb(BEEPER_TASK_EVENT_VERIFICATION_STATUS, (void *)(uintptr_t)is_verified, t->event_cb_user_data);
 
     https_conn_init(&t->https_ctx, &t->https_conn[1]);
-    request_send(&t->https_conn[1], "GET", "sync?timeout=30000", t->auth_header, NULL);
+    request_send(&t->https_conn[1], "GET", "sync?timeout=30000", t->auth_header, NULL, false);
 
     enum { SAS_STEP_REQUEST, SAS_STEP_START, SAS_STEP_KEY,
            SAS_STEP_MAC_NEED_MATCH_AND_MAC, SAS_STEP_MAC_NEED_MATCH, SAS_STEP_MAC_NEED_MAC,
@@ -3942,7 +3947,7 @@ static void * thread(void * arg)
             char * sync_path_with_since;
             assert(-1 != asprintf(&sync_path_with_since, "sync?timeout=30000&since=%s", next_batch));
             free(next_batch);
-            request_send(&t->https_conn[1], "GET", sync_path_with_since, t->auth_header, NULL);
+            request_send(&t->https_conn[1], "GET", sync_path_with_since, t->auth_header, NULL, false);
             free(sync_path_with_since);
         }
 
@@ -4004,7 +4009,22 @@ beeper_task_t * beeper_task_create(const char * path, const char * username, con
     beeper_queue_init(&t->queue, sizeof(beeper_task_queue_item_t));
     assert(0 == pthread_mutex_init(&t->queue_mutex, NULL));
 
-    assert(0 == pthread_create(&t->thread, NULL, thread, t));
+    pthread_attr_t attr;
+    res = pthread_attr_init(&attr);
+    assert(res == 0);
+
+    res = pthread_attr_setstacksize(&attr, CONFIG_MCP_APPS_BEEPER_NETWORKING_THREAD_STACKSIZE);
+    assert(res == 0);
+
+    // struct sched_param sched_param = {.sched_priority=110};
+    // res = pthread_attr_setschedparam(&attr, &sched_param);
+    // assert(res == 0);
+
+    res = pthread_create(&t->thread, &attr, thread, t);
+    assert(res == 0);
+
+    res = pthread_attr_destroy(&attr);
+    assert(res == 0);
 
     return t;
 }

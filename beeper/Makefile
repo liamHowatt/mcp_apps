@@ -29,7 +29,7 @@ CXXFLAGS += ${INCDIR_PREFIX}$(APPDIR)/mcp_apps/beeper/olm/lib
 # hacks
 CXXFLAGS += ${INCDIR_PREFIX}$(APPDIR)/mcp_apps/beeper/include_local
 CFLAGS   += -Wno-shadow -Wno-strict-prototypes
-CXXFLAGS += -Wno-shadow
+CXXFLAGS += -Wno-shadow -fpermissive
 
 CSRCS +=   $(wildcard olm/src/*.c)
 CSRCS +=   olm/lib/crypto-algorithms/sha256.c

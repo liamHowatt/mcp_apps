@@ -14,9 +14,10 @@
 #include <limits.h>
 #include <inttypes.h>
 
-#define BEEPER_ROOT_PATH "/mnt/host/appdata/beeper/"
+#define BEEPER_ROOT_PATH CONFIG_MCP_APPS_BEEPER_APPDATA_PATH "/beeper/"
 #define BEEPER_DEVICE_DISPLAY_NAME "MCP Apps"
-#define BEEPER_RANDOM_PATH "/mnt/host/random"
+#define BEEPER_RANDOM_PATH "/dev/random"
+// #define BEEPER_RANDOM_PATH "/mnt/host/random"
 #define BEEPER_NEW_MESSAGE_READ_AHEAD 30
 
 /* beeper_util.c */

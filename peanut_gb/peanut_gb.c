@@ -115,28 +115,41 @@ static void update_uinput_joypad(ctx_t * ctx)
 
         uint8_t mask;
         switch(keypad_event.code) {
-            case 103: /* KEY_UP */
+            case LV_KEY_UP:
+            case 'w':
+            case 'W':
                 mask = JOYPAD_UP;
                 break;
-            case 108: /* KEY_DOWN */
+            case LV_KEY_DOWN:
+            case 's':
+            case 'S':
                 mask = JOYPAD_DOWN;
                 break;
-            case 105: /* KEY_LEFT */
+            case LV_KEY_LEFT:
+            case 'a':
+            case 'A':
                 mask = JOYPAD_LEFT;
                 break;
-            case 106: /* KEY_RIGHT */
+            case LV_KEY_RIGHT:
+            case 'd':
+            case 'D':
                 mask = JOYPAD_RIGHT;
                 break;
-            case 1: /* KEY_ESC */
+            case LV_KEY_ESC:
+            case LV_KEY_BACKSPACE:
+            case 'b':
+            case 'B':
                 mask = JOYPAD_B;
                 break;
-            case 28: /* KEY_ENTER */
+            case LV_KEY_ENTER:
                 mask = JOYPAD_A;
                 break;
-            case 0x13b: /* BTN_START */
+            case 'h':
+            case 'H':
                 mask = JOYPAD_START;
                 break;
-            case 0x13a: /* BTN_SELECT */
+            case 'g':
+            case 'G':
                 mask = JOYPAD_SELECT;
                 break;
             default:
@@ -318,6 +331,12 @@ static void resize_cb(lv_event_t * e)
     }
 }
 
+static void quit_cb(lv_event_t * e)
+{
+    ctx_t * ctx = lv_event_get_user_data(e);
+    lv_obj_delete(ctx->base_obj);
+}
+
 static void open_menu(ctx_t * ctx)
 {
     lv_obj_t * base_obj = ctx->base_obj;
@@ -343,6 +362,10 @@ static void open_menu(ctx_t * ctx)
     btn = lv_list_add_button(menu, LV_SYMBOL_IMAGE, "Resize");
     lv_group_remove_obj(btn);
     lv_obj_add_event_cb(btn, resize_cb, LV_EVENT_CLICKED, ctx);
+
+    btn = lv_list_add_button(menu, LV_SYMBOL_POWER, "Quit");
+    lv_group_remove_obj(btn);
+    lv_obj_add_event_cb(btn, quit_cb, LV_EVENT_CLICKED, ctx);
 }
 
 static void menu_btn_clicked_cb(lv_event_t * e)

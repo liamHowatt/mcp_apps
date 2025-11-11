@@ -21,14 +21,15 @@
 #ifdef CONFIG_MCP_APPS_PEANUT_GB
 #include <mcp/peanut_gb.h>
 #endif
+#ifdef CONFIG_MCP_APPS_BEEPER
+#include <mcp/beeper.h>
+#endif
 #ifdef CONFIG_MCP_APPS_TEXTER_UI_DEMO
 #include <mcp/texter_ui.h>
 #endif
 
 #include <lvgl/lvgl.h>
 #include <lvgl/src/core/lv_global.h>
-
-#include "runtime_lvgl.h"
 
 #define MQ_MSGSIZE 64
 #define FORTH_DRIVER_MEMORY_SIZE 2048
@@ -158,6 +159,9 @@ static void create_app_list(void)
     lv_obj_set_style_border_width(list, 0, 0);
 #ifdef CONFIG_MCP_APPS_PEANUT_GB
     app_list_helper(list, "Peanut GB", peanut_gb_app_run);
+#endif
+#ifdef CONFIG_MCP_APPS_BEEPER
+    app_list_helper(list, "Beeper", beeper_app_run);
 #endif
 #ifdef CONFIG_MCP_APPS_TEXTER_UI_DEMO
     app_list_helper(list, "Texter UI Demo", texter_ui_demo_app_run);
@@ -373,7 +377,6 @@ static void load_forth_driver(forth_driver_t * drv, const char * path)
         m4_runtime_lib_assert,
         m4_runtime_lib_threadutil,
         M4_RUNTIME_LIB_MCP_ALL_ENTRIES
-        runtime_lib_lvgl,
         runtime_lib_lvgl_app,
         runtime_lib_lvgl_common,
         runtime_lib_lvgl_async_mcpd,
@@ -498,28 +501,7 @@ static void keypad_poll_cb(mcp_lvgl_poll_t * handle, int fd, uint32_t revents, v
     struct keyboard_event_s keypad_event;
     while(sizeof(keypad_event) == (rwres = read(fd, &keypad_event, sizeof(keypad_event)))) {
         once = true;
-        switch(keypad_event.code) {
-            case 103: /* KEY_UP */
-                d->keypad_data.key = LV_KEY_UP;
-                break;
-            case 108: /* KEY_DOWN */
-                d->keypad_data.key = LV_KEY_DOWN;
-                break;
-            case 105: /* KEY_LEFT */
-                d->keypad_data.key = LV_KEY_LEFT;
-                break;
-            case 106: /* KEY_RIGHT */
-                d->keypad_data.key = LV_KEY_RIGHT;
-                break;
-            case 1: /* KEY_ESC */
-                d->keypad_data.key = LV_KEY_ESC;
-                break;
-            case 28: /* KEY_ENTER */
-                d->keypad_data.key = LV_KEY_ENTER;
-                break;
-            default:
-                continue;
-        }
+        d->keypad_data.key = keypad_event.code;
         switch(keypad_event.type) {
             case KEYBOARD_PRESS:
                 d->keypad_data.state = LV_INDEV_STATE_PRESSED;
