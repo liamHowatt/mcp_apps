@@ -30,6 +30,7 @@ extern const m4_runtime_cb_array_t m4_runtime_lib_input[];
 extern const m4_runtime_cb_array_t m4_runtime_lib_mcp_lvgl[];
 #define M4_RUNTIME_LIB_ENTRY_MCP_LVGL m4_runtime_lib_mcp_lvgl,
 #else
+#define M4_RUNTIME_LIB_ENTRY_LVGL
 #define M4_RUNTIME_LIB_ENTRY_MCP_LVGL
 #endif
 
