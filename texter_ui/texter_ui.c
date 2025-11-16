@@ -611,7 +611,7 @@ static void convo_menuitem_clicked_cb(lv_event_t * e)
 static void event_timer_cb(lv_timer_t * event_timer) {
     texter_ui_t * x = lv_timer_get_user_data(event_timer);
 
-    bool stop;
+    bool stop = false;
     x->event_cb_stop_ptr = &stop;
 
     ll_t * event_link;
