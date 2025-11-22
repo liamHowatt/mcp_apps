@@ -20,6 +20,7 @@ extern "C" {
 #define MCPD_NAMETOOLONG  -9
 #define MCPD_ASYNC_WANT_WRITE -10
 #define MCPD_ASYNC_WANT_READ  -11
+#define MCPD_ERROR        -12
 
 #define MCPD_CON_NULL     NULL
 
