@@ -205,7 +205,7 @@ static int mcp_lvgl_app_register(void * param, m4_stack_t * stack)
 {
     if(!(stack->len >= 2)) return M4_STACK_UNDERFLOW_ERROR;
     lvgl_user_data_t * ud = LV_GLOBAL_DEFAULT()->user_data;
-    ud->app_entries = lv_realloc(ud->app_entries, ++ud->app_count);
+    ud->app_entries = lv_realloc(ud->app_entries, ++ud->app_count * sizeof(*ud->app_entries));
     assert(ud->app_entries);
     ud->app_entries[ud->app_count - 1].name = (const char *) stack->data[-2];
     ud->app_entries[ud->app_count - 1].cb   = (app_cb_t)     stack->data[-1];
