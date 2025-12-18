@@ -12,6 +12,10 @@ config MCP_APPS_MCP_FORTH
 
 if MCP_APPS_MCP_FORTH
 
+config MCP_APPS_MCP_FORTH_MAX_CALLBACKS
+        int "max created C callbacks"
+        default 8
+
 config MCP_APPS_MCP_FORTH_SAMPLES_ROMFS
         bool "include sample programs romfs"
         default n

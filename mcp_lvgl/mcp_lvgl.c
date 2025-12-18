@@ -51,13 +51,14 @@ typedef struct {
     int app_count;
     app_entry_t * app_entries;
     lv_obj_t * app_list_obj;
+    bool forth_native;
 #ifdef CONFIG_MCP_APPS_MCP_LVGL_STATIC_FB_STATIC
     bool static_fb_is_held;
 #endif
 } lvgl_user_data_t;
 
 typedef struct {
-    uint8_t * bin;
+    mcp_forth_load_t load;
     uint8_t memory[FORTH_DRIVER_MEMORY_SIZE];
 } forth_driver_t;
 
@@ -97,6 +98,13 @@ static const m4_runtime_cb_array_t runtime_lib_lvgl_common[] = {
     {"mcp_lvgl_poll_add", {m4_f14, mcp_lvgl_poll_add}},
     {"mcp_lvgl_poll_modify", {m4_f02, mcp_lvgl_poll_modify}},
     {"mcp_lvgl_poll_remove", {m4_f01, mcp_lvgl_poll_remove}},
+    {"epollin", {m4_lit, (void *) EPOLLIN}},
+    {"epollout", {m4_lit, (void *) EPOLLOUT}},
+    {"epollrdhup", {m4_lit, (void *) EPOLLRDHUP}},
+    {"epollpri", {m4_lit, (void *) EPOLLPRI}},
+    {"epollerr", {m4_lit, (void *) EPOLLERR}},
+    {"epollhup", {m4_lit, (void *) EPOLLHUP}},
+    {"epollet", {m4_lit, (void *) EPOLLET}},
     {NULL}
 };
 
@@ -324,7 +332,8 @@ static const m4_runtime_cb_array_t runtime_lib_static_fb[] = {
 static void load_forth_driver(forth_driver_t * drv, const char * path)
 {
     int res;
-    ssize_t rwres;
+
+    lvgl_user_data_t * ud = LV_GLOBAL_DEFAULT()->user_data;
 
     int id = mcp_fs_path_get_peer_id(path);
     if(id >= 0) {
@@ -335,42 +344,7 @@ static void load_forth_driver(forth_driver_t * drv, const char * path)
         assert(res == 0);
     }
 
-    char * cachepath = mcp_fs_cache_file(path);
-    if(cachepath) {
-        path = cachepath;
-    }
-
-    int fd = open(path, O_RDONLY);
-    free(cachepath);
-    if(fd == -1) {
-        perror("open");
-        exit(1);
-    }
-
-    struct stat st;
-    res = fstat(fd, &st);
-    assert(res == 0);
-    ssize_t buf_len = st.st_size;
-    assert(buf_len >= 0);
-
-    char * code_buf = malloc(buf_len);
-    assert(code_buf);
-    rwres = read(fd, code_buf, buf_len);
-    assert(rwres == buf_len);
-
-    res = close(fd);
-    assert(res == 0);
-
-    int error_near;
-    int bin_len = m4_compile(code_buf, buf_len, &drv->bin, NULL,
-        &m4_compact_bytecode_vm_backend, &error_near);
-    free(code_buf);
-    if(bin_len < 0) {
-        fprintf(stderr, "m4_compile: error %d near %d\n", bin_len, error_near);
-        exit(1);
-    }
-
-    static const m4_runtime_cb_array_t * cbs[] = {
+    static const m4_runtime_cb_array_t * const cbs[] = {
         m4_runtime_lib_io,
         m4_runtime_lib_string,
         m4_runtime_lib_time,
@@ -384,30 +358,28 @@ static void load_forth_driver(forth_driver_t * drv, const char * path)
         NULL
     };
 
-    const char * missing_word;
-    res = m4_vm_engine_run(
-        drv->bin,
-        NULL,
+    mcp_forth_error_info_t load_error;
+    mcp_forth_error_t load_res = mcp_forth_load_and_run_path(
+        &drv->load,
+        path,
         drv->memory,
         FORTH_DRIVER_MEMORY_SIZE,
         cbs,
-        &missing_word
+        ud->forth_native,
+        &load_error
     );
-    if(res == M4_RUNTIME_WORD_MISSING_ERROR) {
-        fprintf(stderr, "m4_vm_engine_run: runtime word \"%s\" missing\n", missing_word);
-        free(drv->bin);
-        exit(1);
-    }
-    if(res) {
-        fprintf(stderr, "m4_vm_engine_run: engine error %d\n", res);
-        free(drv->bin);
+
+    mcp_forth_log_error(load_res, &load_error);
+
+    if(load_res != MCP_FORTH_ERROR_NONE) {
+        mcp_forth_unload(&drv->load);
         exit(1);
     }
 }
 
 static void unload_forth_driver(forth_driver_t * drv)
 {
-    free(drv->bin);
+    mcp_forth_unload(&drv->load);
 }
 
 static uint32_t millis(void)
@@ -518,6 +490,16 @@ static void keypad_poll_cb(mcp_lvgl_poll_t * handle, int fd, uint32_t revents, v
     assert(once);
 }
 
+static bool should_use_forth_native(int argc, char * argv[])
+{
+    for(int i = 1; i < argc; i++) {
+        if(0 == strcmp(argv[i], "-O")) {
+            return true;
+        }
+    }
+    return false;
+}
+
 #if CONFIG_MCP_APPS_MCP_LVGL_STATIC_STACK_THREAD_STACKSIZE
 static void * mcp_lvgl_thread(void * arg);
 
@@ -536,7 +518,9 @@ int mcp_lvgl_main(int argc, char *argv[])
     res = pthread_attr_setinheritsched(&attr, PTHREAD_INHERIT_SCHED);
     assert(res == 0);
 
-    res = pthread_create(&thread, &attr, mcp_lvgl_thread, NULL);
+    void * arg = (void *)(uintptr_t) should_use_forth_native(argc, argv);
+
+    res = pthread_create(&thread, &attr, mcp_lvgl_thread, arg);
     assert(res == 0);
 
     res = pthread_attr_destroy(&attr);
@@ -549,13 +533,18 @@ int mcp_lvgl_main(int argc, char *argv[])
 }
 
 static void * mcp_lvgl_thread(void * arg)
+{
+    bool forth_native = (uintptr_t) arg;
 #else
 int mcp_lvgl_main(int argc, char *argv[])
-#endif
 {
+    bool forth_native = should_use_forth_native(argc, argv);
+#endif
     ssize_t rwres;
 
-    lvgl_user_data_t lvgl_user_data = {0};
+    lvgl_user_data_t lvgl_user_data = {
+        .forth_native = forth_native,
+    };
 
     driver_ll_t * drv_head = NULL;
 
@@ -614,7 +603,7 @@ int mcp_lvgl_main(int argc, char *argv[])
 
     lv_free(lvgl_user_data.app_entries);
 
-    m4_global_cleanup();
+    mcp_forth_global_cleanup();
 
     assert(0 == close(keypad_fd));
 

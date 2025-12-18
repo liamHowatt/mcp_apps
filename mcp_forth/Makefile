@@ -9,9 +9,24 @@ MODULE = $(CONFIG_MCP_APPS_MCP_FORTH)
 
 # MCP Forth
 
+MCP_FORTH_GENERATOR_OPTS = MAX_CALLBACKS=$(CONFIG_MCP_APPS_MCP_FORTH_MAX_CALLBACKS)
+
 ifneq ($(CONFIG_SCHED_THREAD_LOCAL),y)
-	CFLAGS += ${DEFINE_PREFIX}M4_NO_TLS ${DEFINE_PREFIX}M4_NO_THREAD
+	MCP_FORTH_GENERATOR_OPTS +=  NO_TLS  NO_THREAD
 endif
+
+mcp_forth/mcp_forth_generated.h: mcp_forth/mcp_forth_generated.phony
+mcp_forth/mcp_forth_generated.mac: mcp_forth/mcp_forth_generated.phony
+
+mcp_forth/mcp_forth_generated.phony: mcp_forth/mcp_forth_generator.py
+	bash -c 'cd mcp_forth && python3 mcp_forth_generator.py $(MCP_FORTH_GENERATOR_OPTS)'
+	touch mcp_forth/mcp_forth_generated.phony
+
+mcp_forth/mcp_forth.h: mcp_forth/mcp_forth_generated.h
+mcp_forth/x86-32_engine_asm.s: mcp_forth/mcp_forth_generated.mac
+mcp_forth/esp32s3_engine_asm.S: mcp_forth/mcp_forth_generated.h
+mcp_forth/x86_32_backend_generator.py: mcp_forth/backend_generator.py
+mcp_forth/esp32s3_backend_generator.py: mcp_forth/backend_generator.py mcp_forth/esp32s3.h
 
 MAINSRC = mcp_forth.c
 CSRCS += mcp_forth/mcp_forth.c
@@ -41,7 +56,7 @@ mcp_forth/x86-32_backend.c: mcp_forth/x86_32_backend_generated.h
 mcp_forth/x86_32_backend_generated.c: mcp_forth/x86_32_backend_generated.phony
 mcp_forth/x86_32_backend_generated.h: mcp_forth/x86_32_backend_generated.phony
 
-mcp_forth/x86_32_backend_generated.phony: mcp_forth/x86_32_backend_generator.py mcp_forth/backend_generator.py
+mcp_forth/x86_32_backend_generated.phony: mcp_forth/x86_32_backend_generator.py
 	bash -c 'cd mcp_forth && python3 x86_32_backend_generator.py'
 	touch mcp_forth/x86_32_backend_generated.phony
 
@@ -66,14 +81,12 @@ mcp_forth/esp32s3_backend.c: mcp_forth/esp32s3_backend_generated.h
 mcp_forth/esp32s3_backend_generated.c: mcp_forth/esp32s3_backend_generated.phony
 mcp_forth/esp32s3_backend_generated.h: mcp_forth/esp32s3_backend_generated.phony
 
-mcp_forth/esp32s3_backend_generated.phony: mcp_forth/esp32s3_backend_generator.py mcp_forth/backend_generator.py mcp_forth/esp32s3.h
+mcp_forth/esp32s3_backend_generated.phony: mcp_forth/esp32s3_backend_generator.py
 	bash -c 'cd mcp_forth && python3 esp32s3_backend_generator.py'
 	touch mcp_forth/esp32s3_backend_generated.phony
 
 clean::
-	$(call DELFILE, mcp_forth/esp32s3_backend_generated.phony)
-	$(call DELFILE, mcp_forth/esp32s3_backend_generated.c)
-	$(call DELFILE, mcp_forth/esp32s3_backend_generated.h)
+	$(call DELFILE, mcp_forth/esp32s3_backend_generated.*)
 
 CSRCS += mcp_forth/esp32s3_backend.c
 CSRCS += mcp_forth/esp32s3_engine.c
@@ -95,7 +108,7 @@ CSRCS += bindings/runtime_unix.c
 CSRCS += bindings/runtime_malloc.c
 
 clean::
-	$(call DELFILE, m4_samples_romfs.img samples_romfs_img.c)
+	$(call DELFILE, mcp_forth/mcp_forth_generated.* m4_samples_romfs.img samples_romfs_img.c)
 
 distclean:: clean
 

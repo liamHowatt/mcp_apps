@@ -10,6 +10,8 @@
 #include <assert.h>
 
 #include <termios.h>
+#include <unistd.h>
+#include <fcntl.h>
 
 static int mcpd_driver_connect(void * param, m4_stack_t * stack)
 {
@@ -94,7 +96,6 @@ static int mcpd_uart_set_baud(void * param, m4_stack_t * stack)
         case    9600: speed_val =    B9600; break;
         case   19200: speed_val =   B19200; break;
         case   38400: speed_val =   B38400; break;
-
         case   57600: speed_val =   B57600; break;
         case  115200: speed_val =  B115200; break;
         case  230400: speed_val =  B230400; break;
@@ -121,6 +122,26 @@ static int mcpd_uart_set_baud(void * param, m4_stack_t * stack)
     if(res) return 0;
     res = tcsetattr(fd, TCSAFLUSH, &tio); /* TCSAFLUSH: write all output and discard input */
     if(res) return 0;
+
+    stack->data[-1] = MCPD_OK;
+    return 0;
+}
+
+static int mcpd_uart_set_blocking(void * param, m4_stack_t * stack)
+{
+    if(stack->len < 2) return M4_STACK_UNDERFLOW_ERROR;
+    int fd = stack->data[-2];
+    bool blocking = stack->data[-1];
+    stack->data -= 1;
+    stack->len -= 1;
+    stack->data[-1] = MCPD_ERROR;
+
+    int res;
+    int flags = fcntl(fd, F_GETFL, 0);
+    if(flags == -1) return 0;
+    flags = blocking ? (flags & ~O_NONBLOCK) : (flags | O_NONBLOCK);
+    res = fcntl(fd, F_SETFL, flags);
+    if(res == -1) return 0;
 
     stack->data[-1] = MCPD_OK;
     return 0;
@@ -187,6 +208,7 @@ const m4_runtime_cb_array_t m4_runtime_lib_mcpd[] = {
     {"mcpd_acatpath", {mcpd_acatpath}},
 
     {"mcpd_uart_set_baud", {mcpd_uart_set_baud}},
+    {"mcpd_uart_set_blocking", {mcpd_uart_set_blocking}},
 
 
     {NULL}
