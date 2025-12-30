@@ -1,0 +1,14 @@
+include $(APPDIR)/Make.defs
+
+# MCP Init built-in application info
+
+PROGNAME = $(CONFIG_MCP_APPS_MCP_INIT_PROGNAME)
+PRIORITY = $(CONFIG_MCP_APPS_MCP_INIT_PRIORITY)
+STACKSIZE = $(CONFIG_MCP_APPS_MCP_INIT_STACKSIZE)
+MODULE = $(CONFIG_MCP_APPS_MCP_INIT)
+
+# MCP Init
+
+MAINSRC = mcp_init.c
+
+include $(APPDIR)/Application.mk

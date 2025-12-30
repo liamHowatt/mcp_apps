@@ -1,0 +1,30 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config MCP_APPS_MCP_INIT
+        tristate "MCP Init App"
+        default n
+        depends on LIBC_EXECFUNCS
+        ---help---
+                Enable the MCP Init App
+
+if MCP_APPS_MCP_INIT
+
+config MCP_APPS_MCP_INIT_PROGNAME
+        string "Program name"
+        default "mcp_init"
+        ---help---
+                This is the name of the program that will be used when the NSH ELF
+                program is installed.
+
+config MCP_APPS_MCP_INIT_PRIORITY
+        int "MCP Init task priority"
+        default 100
+
+config MCP_APPS_MCP_INIT_STACKSIZE
+        int "MCP Init stack size"
+        default DEFAULT_TASK_STACKSIZE
+
+endif
