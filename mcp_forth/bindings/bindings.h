@@ -36,6 +36,7 @@ extern const m4_runtime_cb_array_t m4_runtime_lib_mcp_lvgl[];
 
 extern const m4_runtime_cb_array_t m4_runtime_lib_unix[];
 extern const m4_runtime_cb_array_t m4_runtime_lib_malloc[];
+extern const m4_runtime_cb_array_t m4_runtime_lib_mount[];
 
 #define M4_RUNTIME_LIB_MCP_ALL_ENTRIES \
     M4_RUNTIME_LIB_ENTRY_MCPD \
@@ -44,4 +45,6 @@ extern const m4_runtime_cb_array_t m4_runtime_lib_malloc[];
     M4_RUNTIME_LIB_ENTRY_LVGL \
     M4_RUNTIME_LIB_ENTRY_MCP_LVGL \
     m4_runtime_lib_unix, \
-    m4_runtime_lib_malloc,
+    m4_runtime_lib_malloc, \
+    m4_runtime_lib_mount, \
+    /* keep this line blank */
