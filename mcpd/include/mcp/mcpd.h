@@ -21,13 +21,22 @@ extern "C" {
 #define MCPD_ASYNC_WANT_WRITE -10
 #define MCPD_ASYNC_WANT_READ  -11
 #define MCPD_ERROR        -12
+#define MCPD_WOULD_BLOCK  -13
 
 #define MCPD_CON_NULL     NULL
+#define MCPD_WATCH_NULL   -1
 
 typedef struct mcpd_con_s * mcpd_con_t;
+typedef int mcpd_watch_t;
 
 int mcpd_connect(mcpd_con_t * con_dst, int peer_id);
 void mcpd_disconnect(mcpd_con_t con);
+
+mcpd_watch_t mcpd_watch_create(void);
+void mcpd_watch_destroy(mcpd_watch_t watch);
+int mcpd_watch_wait(mcpd_watch_t watch);
+void mcpd_watch_set_blocking(mcpd_watch_t watch, bool blocking);
+int mcpd_watch_get_polling_fd(mcpd_watch_t watch);
 
 void mcpd_write(mcpd_con_t con, const void * data, uint32_t len);
 void mcpd_read(mcpd_con_t con, void * data, uint32_t len);

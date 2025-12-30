@@ -45,10 +45,9 @@ static void fd_set_blocking(int fd, bool blocking)
     assert(-1 != fcntl(fd, F_SETFL, flags));
 }
 
-int mcpd_connect(mcpd_con_t * con_dst, int peer_id)
+static int connect_common(void)
 {
     int res;
-    ssize_t rwres;
 
     /* opening this fifo will block until the daemon has opened it for reading */
     res = mkfifo(SOC_WAITER_FIFO, 0666);
@@ -69,6 +68,16 @@ int mcpd_connect(mcpd_con_t * con_dst, int peer_id)
 
     res = connect(con, (struct sockaddr *) &addr, sizeof(addr));
     assert(res == 0);
+
+    return con;
+}
+
+int mcpd_connect(mcpd_con_t * con_dst, int peer_id)
+{
+    int res;
+    ssize_t rwres;
+
+    int con = connect_common();
 
     uint8_t token = peer_id;
     rwres = write(con, &token, 1);
@@ -125,6 +134,52 @@ void mcpd_disconnect(mcpd_con_t conp)
     }
 
     free(conp);
+}
+
+mcpd_watch_t mcpd_watch_create(void)
+{
+    ssize_t rwres;
+
+    int con = connect_common();
+
+    uint8_t token = 255;
+    rwres = write(con, &token, 1);
+    assert(rwres > 0);
+
+    return con;
+}
+
+void mcpd_watch_destroy(mcpd_watch_t watch)
+{
+    int res;
+
+    res = close(watch);
+    assert(res == 0);
+}
+
+int mcpd_watch_wait(mcpd_watch_t watch)
+{
+    ssize_t rwres;
+
+    uint8_t new_token;
+    rwres = read(watch, &new_token, 1);
+    if(rwres < 0) {
+        assert(errno == EAGAIN || errno == EWOULDBLOCK);
+        return MCPD_WOULD_BLOCK;
+    }
+    assert(rwres == 1);
+
+    return new_token;
+}
+
+void mcpd_watch_set_blocking(mcpd_watch_t watch, bool blocking)
+{
+    fd_set_blocking(watch, blocking);
+}
+
+int mcpd_watch_get_polling_fd(mcpd_watch_t watch)
+{
+    return watch;
 }
 
 void mcpd_write(mcpd_con_t conp, const void * data, uint32_t len)

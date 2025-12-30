@@ -92,10 +92,22 @@ typedef struct {
     master_socket_sm_t s0;
     poller_socket_sm_t s1;
     int sfd;
+    uint8_t my_token;
+    uint8_t global_token_count;
     uint8_t pin_periph_owners[MCP_PINS_PERIPH_COUNT];
     uint8_t pin_driver_active[MCP_PINS_PERIPH_COUNT];
     uint8_t pin_driver_minor_numbers[MCP_PINS_PERIPH_COUNT];
 } socket_sms_t;
+
+typedef struct {
+    const socket_sms_t * s;
+    uint32_t pollfds_offset;
+    uint32_t i;
+    uint32_t count;
+    uint8_t * next;
+    struct pollfd ** pollfds_p;
+    nfds_t * n_pollfds_p;
+} watch_data_t;
 
 static unsigned periph_last_driver(unsigned periph) {
     switch(periph) {
@@ -574,6 +586,65 @@ static void continue_transfer(socket_sms_t * s, peer_data_t * pd, struct pollfd 
     }
 }
 
+static void close_watcher(watch_data_t * wd)
+{
+    int res;
+
+    struct pollfd * pfd = &(*wd->pollfds_p)[wd->pollfds_offset + wd->i];
+
+    res = close(pfd->fd);
+    assert(res == 0);
+
+    if(wd->count > 1) {
+        wd->next[wd->i] = wd->next[wd->count - 1];
+        wd->next = realloc(wd->next, (wd->count - 1) * sizeof(*wd->next));
+        assert(wd->next);
+
+        memcpy(pfd, &(*wd->pollfds_p)[*wd->n_pollfds_p - 1], sizeof(struct pollfd));
+    }
+    else {
+        free(wd->next);
+        wd->next = NULL;
+    }
+
+    *wd->pollfds_p = realloc(*wd->pollfds_p, (*wd->n_pollfds_p - 1) * sizeof(struct pollfd));
+    assert(*wd->pollfds_p);
+
+    wd->count -= 1;
+    *wd->n_pollfds_p -= 1;
+    wd->i -= 1; /* redo this loop index */
+}
+
+static void update_watcher(watch_data_t * wd)
+{
+    ssize_t rwres;
+
+    struct pollfd * pfd = &(*wd->pollfds_p)[wd->pollfds_offset + wd->i];
+    uint8_t wn;
+
+    for(wn = wd->next[wd->i]; wn < wd->s->global_token_count; wn++) {
+        if(wn == wd->s->my_token) continue;
+
+        rwres = write(pfd->fd, &wn, 1);
+        if(rwres < 0) {
+            if(errno == EAGAIN || errno == EWOULDBLOCK) {
+                pfd->events = POLLOUT;
+                wd->next[wd->i] = wn;
+                return;
+            }
+            if(errno == EPIPE) {
+                close_watcher(wd);
+                return;
+            }
+            assert(0);
+        }
+        else assert(rwres == 1);
+    }
+
+    pfd->events = 0;
+    wd->next[wd->i] = wn;
+}
+
 int mcpd_main(int argc, char *argv[])
 {
     int res;
@@ -588,7 +659,7 @@ int mcpd_main(int argc, char *argv[])
     pin_socket_ctx_init(&s.s1.pin_soc, "/dev/mcp1_clk", "/dev/mcp1_dat", "/dev/timer3", SIGUSR2, poller_sm_next_byte_cb);
 
     do_write(&s.s0.pin_soc, 255); /* assign me a token */
-    uint8_t my_token = do_read(&s.s0.pin_soc);
+    s.my_token = do_read(&s.s0.pin_soc);
 
     do_write(&s.s0.pin_soc, MMN_SRV_OPCODE_GETINFO);
     uint8_t info_count = do_read(&s.s0.pin_soc);
@@ -603,10 +674,10 @@ int mcpd_main(int argc, char *argv[])
         while(--info_count) do_read(&s.s0.pin_soc);
     }
 
-    do_write(&s.s1.pin_soc, my_token); /* associate with other socket */
+    do_write(&s.s1.pin_soc, s.my_token); /* associate with other socket */
 
-    run_socket(&s.s0.pin_soc, my_token);
-    run_socket(&s.s1.pin_soc, my_token);
+    run_socket(&s.s0.pin_soc, s.my_token);
+    run_socket(&s.s1.pin_soc, s.my_token);
 
     uint8_t s_wheres[2];
     do_write(&s.s0.pin_soc, MMN_SRV_OPCODE_WHEREAMI);
@@ -662,31 +733,39 @@ int mcpd_main(int argc, char *argv[])
     pollfds[1].fd = srv;
     pollfds[1].events = POLLIN;
 
-    uint8_t global_token_count = 0;
+    s.global_token_count = 0;
+
+    watch_data_t wd;
+    wd.s = &s;
+    wd.count = 0;
+    wd.next = NULL;
+    wd.pollfds_p = &pollfds;
+    wd.n_pollfds_p = &n_pollfds;
 
     while(1) {
         while(s.s1.something_happened) {
             s.s1.something_happened = false;
 
-            uint8_t tokens_to_add = s.s1.new_global_token_count - global_token_count;
-            if (my_token >= global_token_count && my_token < s.s1.new_global_token_count) {
+            uint8_t tokens_to_add = s.s1.new_global_token_count - s.global_token_count;
+            if (s.my_token >= s.global_token_count && s.my_token < s.s1.new_global_token_count) {
                 tokens_to_add--;
             }
-            uint8_t old_global_token_count = global_token_count;
-            global_token_count = s.s1.new_global_token_count;
+            uint8_t old_global_token_count = s.global_token_count;
+            s.global_token_count = s.s1.new_global_token_count;
             if(tokens_to_add) {
                 uint8_t old_peer_count = s.s1.peer_count;
                 s.s1.peer_count += tokens_to_add;
 
                 s.s1.peer_datas = realloc(s.s1.peer_datas, s.s1.peer_count * sizeof(peer_data_t));
                 assert(s.s1.peer_datas);
-                n_pollfds = POLLFDS_PEER_START + s.s1.peer_count;
+                n_pollfds += tokens_to_add;
                 pollfds = realloc(pollfds, n_pollfds * sizeof(struct pollfd));
                 assert(pollfds);
+                memmove(&pollfds[POLLFDS_PEER_START + s.s1.peer_count], &pollfds[POLLFDS_PEER_START + old_peer_count], wd.count * sizeof(struct pollfd));
 
                 uint8_t new_token = old_global_token_count;
                 for(uint8_t i = old_peer_count; i < s.s1.peer_count; i++) {
-                    if(new_token == my_token) new_token++;
+                    if(new_token == s.my_token) new_token++;
 
                     peer_data_t * pd = &s.s1.peer_datas[i];
                     pd->token = new_token;
@@ -707,6 +786,13 @@ int mcpd_main(int argc, char *argv[])
                                                   s.s1.peer_datas[i].token,
                                                   MMN_SRV_FLAG_READABLE | MMN_SRV_FLAG_WRITABLE};
                     multitasking_write(&s, set_interest_buf, sizeof(set_interest_buf));
+                }
+
+                wd.pollfds_offset = POLLFDS_PEER_START + s.s1.peer_count;
+                for(wd.i = 0; wd.i < wd.count; wd.i++) {
+                    struct pollfd * pfd = &pollfds[wd.pollfds_offset + wd.i];
+                    if(pfd->events) continue;
+                    update_watcher(&wd);
                 }
             }
 
@@ -746,35 +832,65 @@ int mcpd_main(int argc, char *argv[])
             rwres = read(new_soc, &for_token, 1);
             assert(rwres > 0);
 
-            uint8_t response = RESULT_OK;
+            if(for_token < 255) {
+                uint8_t response = RESULT_OK;
 
-            uint8_t i;
-            struct pollfd * pfd;
-            for(i = 0; i < s.s1.peer_count; i++)
-                if(s.s1.peer_datas[i].token == for_token) break;
-            if(i == s.s1.peer_count) {
-                response = RESULT_TOKEN_DOESNT_EXIST;
-            } else {
-                pfd = &pollfds[POLLFDS_PEER_START + i];
+                uint8_t i;
+                struct pollfd * pfd;
+                for(i = 0; i < s.s1.peer_count; i++)
+                    if(s.s1.peer_datas[i].token == for_token) break;
+                if(i == s.s1.peer_count) {
+                    response = RESULT_TOKEN_DOESNT_EXIST;
+                } else {
+                    pfd = &pollfds[POLLFDS_PEER_START + i];
+                }
+
+                /* This pfd->fd != -1 is not the same as pfd->fd < 0
+                 * because a busy connection may set its fd
+                 * negative which means it's just disabled, not closed.
+                 * The only sentinel value meaning "vacant" here is -1.
+                 */
+                if(response == RESULT_OK && pfd->fd != -1) {
+                    response = RESULT_MODULE_BUSY;
+                }
+
+                rwres = write(new_soc, &response, 1);
+                assert(rwres > 0);
+
+                if(response == RESULT_OK) {
+                    pfd->fd = new_soc;
+                } else {
+                    res = close(new_soc);
+                    assert(res == 0);
+                }
             }
+            else {
+                /* it's a watcher */
 
-            /* This pfd->fd != -1 is not the same as pfd->fd < 0
-             * because a busy connection may set its fd
-             * negative which means it's just disabled, not closed.
-             * The only sentinel value meaning "vacant" here is -1.
-             */
-            if(response == RESULT_OK && pfd->fd != -1) {
-                response = RESULT_MODULE_BUSY;
-            }
+                wd.count += 1;
 
-            rwres = write(new_soc, &response, 1);
-            assert(rwres > 0);
+                n_pollfds += 1;
+                pollfds = realloc(pollfds, n_pollfds * sizeof(struct pollfd));
+                assert(pollfds);
 
-            if(response == RESULT_OK) {
+                struct pollfd * pfd = &pollfds[n_pollfds - 1];
                 pfd->fd = new_soc;
-            } else {
-                res = close(new_soc);
-                assert(res == 0);
+                pfd->events = 0;
+
+                wd.next = realloc(wd.next, wd.count * sizeof(*wd.next));
+                assert(wd.next);
+                wd.next[wd.count - 1] = 0;
+
+                /* set non-blocking */
+                int flags = fcntl(new_soc, F_GETFL, 0);
+                assert(flags != -1);
+                flags &= ~O_NONBLOCK;
+                res = fcntl(new_soc, F_SETFL, flags);
+                assert(res != -1);
+
+                wd.pollfds_offset = POLLFDS_PEER_START + s.s1.peer_count;
+                wd.i = wd.count - 1;
+                update_watcher(&wd);
             }
 
             if(--remaining_ready_fds == 0) continue;
@@ -783,7 +899,7 @@ int mcpd_main(int argc, char *argv[])
         for(uint8_t peer_i = 0; peer_i < s.s1.peer_count; peer_i++) {
             struct pollfd * pfd = &pollfds[POLLFDS_PEER_START + peer_i];
             if(!pfd->revents) continue;
-            assert(!(pfd->revents & (POLLERR | POLLNVAL)));
+            assert(pfd->revents == POLLIN);
 
             peer_data_t * pd = &s.s1.peer_datas[peer_i];
 
@@ -1021,6 +1137,23 @@ int mcpd_main(int argc, char *argv[])
 
             if(--remaining_ready_fds == 0) break;
         }
+        if(remaining_ready_fds == 0) continue;
+
+        wd.pollfds_offset = POLLFDS_PEER_START + s.s1.peer_count;
+        for(wd.i = 0; wd.i < wd.count; wd.i++) {
+            struct pollfd * pfd = &pollfds[wd.pollfds_offset + wd.i];
+            if(!pfd->revents) continue;
+
+            if(pfd->revents & POLLHUP) {
+                close_watcher(&wd);
+            }
+            else if(pfd->revents == POLLOUT) {
+                update_watcher(&wd);
+            }
+            else assert(0);
+
+            if(--remaining_ready_fds == 0) break;
+        }
     }
 
     // int peer_count_signed = s.s1.peer_count
@@ -1035,6 +1168,7 @@ int mcpd_main(int argc, char *argv[])
     free(pollfds);
     for(uint8_t i = 0; i < s.s1.peer_count; i++) free(s.s1.peer_datas[i].resources);
     free(s.s1.peer_datas);
+    free(wd.next);
 
     // // close(srv_fifo);
     // close(srv);
