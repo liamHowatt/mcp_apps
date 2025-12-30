@@ -197,13 +197,16 @@ static int op_open(FAR void *volinfo, FAR const char *relpath,
     peer->con = con;
     peer->refcount = 1;
     peer->is_reading = accmode == O_RDONLY;
-    *openinfo = peer;
+    *openinfo = (void *)(intptr_t) peer_id;
     return 0;
 }
 
 static int op_close(FAR void *volinfo, FAR void *openinfo)
 {
-    peer_t * peer = openinfo;
+    volinfo_t * vinfo = volinfo;
+    int peer_id = (intptr_t) openinfo;
+
+    peer_t * peer = &vinfo->peers[peer_id];
 
     if(--peer->refcount) return 0;
 
@@ -227,7 +230,10 @@ static int op_close(FAR void *volinfo, FAR void *openinfo)
 static ssize_t op_read(FAR void *volinfo, FAR void *openinfo,
     FAR char *buffer, size_t buflen)
 {
-    peer_t * peer = openinfo;
+    volinfo_t * vinfo = volinfo;
+    int peer_id = (intptr_t) openinfo;
+
+    peer_t * peer = &vinfo->peers[peer_id];
 
     if(!peer->is_reading) return -EBADF;
 
@@ -264,7 +270,10 @@ static ssize_t op_read(FAR void *volinfo, FAR void *openinfo,
 static ssize_t op_write(FAR void *volinfo, FAR void *openinfo,
     FAR const char *buffer, size_t buflen)
 {
-    peer_t * peer = openinfo;
+    volinfo_t * vinfo = volinfo;
+    int peer_id = (intptr_t) openinfo;
+
+    peer_t * peer = &vinfo->peers[peer_id];
 
     if(peer->is_reading) return -EBADF;
 
@@ -307,7 +316,10 @@ static int op_sync(FAR void *volinfo, FAR void *openinfo)
 static int op_dup(FAR void *volinfo, FAR void *oldinfo,
     FAR void **newinfo)
 {
-    peer_t * peer = oldinfo;
+    volinfo_t * vinfo = volinfo;
+    int peer_id = (intptr_t) oldinfo;
+
+    peer_t * peer = &vinfo->peers[peer_id];
 
     peer->refcount++;
 
@@ -318,7 +330,10 @@ static int op_dup(FAR void *volinfo, FAR void *oldinfo,
 static int op_fstat(FAR void *volinfo, FAR void *openinfo,
     FAR struct stat *statbuf)
 {
-    peer_t * peer = openinfo;
+    volinfo_t * vinfo = volinfo;
+    int peer_id = (intptr_t) openinfo;
+
+    peer_t * peer = &vinfo->peers[peer_id];
 
     memset(statbuf, 0, sizeof(*statbuf));
 
@@ -776,6 +791,7 @@ char * mcp_fs_cache_file(const char * file_path)
 
 success_post_free_ret:
     ret = strdup(cachepath);
+    assert(ret);
 post_free_ret:
     assert(0 == sem_post(sem));
 free_ret:
