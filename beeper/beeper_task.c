@@ -298,6 +298,13 @@ static char * base64_encode(const char * input)
     return encoded;
 }
 
+static size_t base64_decode(void * buf, size_t buf_len)
+{
+    size_t res_len = _olm_decode_base64(buf, buf_len, buf);
+    assert(res_len != (size_t)-1);
+    return res_len;
+}
+
 static void base64_filename_safe(char * s)
 {
     char c;
@@ -1973,6 +1980,25 @@ static char * room_session_make_dirs_and_path(beeper_task_t * t, room_t * room, 
     return room_session_make_path(t, room, session_id);
 }
 
+static char * room_session_unavailable_make_path(beeper_task_t * t, room_t * room, const char * session_id)
+{
+    size_t session_id_len = strlen(session_id);
+    char * fname = beeper_asserting_malloc(session_id_len + 2);
+    fname[0] = '@';
+    char * session_id_safe = &fname[1];
+    strcpy(session_id_safe, session_id);
+    base64_filename_safe(session_id_safe);
+    char * session_unavailable_path = room_make_path(t, room, fname);
+    free(fname);
+    return session_unavailable_path;
+}
+
+static char * room_session_unavailable_make_dirs_and_path(beeper_task_t * t, room_t * room, const char * session_id)
+{
+    room_create_dir(t, room);
+    return room_session_unavailable_make_path(t, room, session_id);
+}
+
 static void room_session_save(beeper_task_t * t, room_t * room, room_session_t * session)
 {
     if(!session->needs_save) {
@@ -2112,50 +2138,90 @@ static char * room_session_decrypt(room_session_t * session, const char * cipher
     return body;
 }
 
-static void room_decrypting_continue_with_bridgebot(beeper_task_t * t, room_t * room, room_decrypting_t * decrypting)
+static bool room_session_unavailable_search(FILE * f, const char * user_id_to_find)
 {
-    decrypting->state = ROOM_DECRYPTING_STATE_SESSION;
+    ssize_t rwres;
 
-    key_list_user_t * bridgebot_user = key_list_device_get_all(t, room->bridgebot);
+    char * user_id = NULL;
+    size_t user_id_cap = 0;
 
-    uint64_t key_request_txnid = txnid_next(t);
-    char key_request_txnid_buf[TXNID_SIZE + 1];
-    snprintf(key_request_txnid_buf, sizeof(key_request_txnid_buf), TXNID_FMT, key_request_txnid);
+    bool found = false;
 
-    cJSON * cont = unwrap_cjson(cJSON_CreateObject());
-    cJSON_AddItemToObjectCS(cont, "action", unwrap_cjson(cJSON_CreateStringReference("request")));
-    cJSON * body = unwrap_cjson(cJSON_CreateObject());
-    cJSON_AddItemToObjectCS(cont, "body", body);
-    cJSON_AddItemToObjectCS(body, "algorithm", unwrap_cjson(cJSON_CreateStringReference("m.megolm.v1.aes-sha2")));
-    cJSON_AddItemToObjectCS(body, "room_id", unwrap_cjson(cJSON_CreateStringReference(room->room_id)));
-    cJSON_AddItemToObjectCS(body, "sender_key", unwrap_cjson(cJSON_CreateStringReference(decrypting->sender_key)));
-    cJSON_AddItemToObjectCS(body, "session_id", unwrap_cjson(cJSON_CreateStringReference(decrypting->session_id)));
-    cJSON_AddItemToObjectCS(cont, "request_id", unwrap_cjson(cJSON_CreateStringReference(key_request_txnid_buf)));
-    cJSON_AddItemToObjectCS(cont, "requesting_device_id", unwrap_cjson(cJSON_CreateStringReference(t->device_id)));
-
-    cJSON * key_request_full = unwrap_cjson(cJSON_CreateObject());
-    cJSON * users_obj = unwrap_cjson(cJSON_CreateObject());
-    cJSON_AddItemToObjectCS(key_request_full, "messages", users_obj);
-    cJSON * devices_obj = unwrap_cjson(cJSON_CreateObject());
-    cJSON_AddItemToObjectCS(users_obj, room->bridgebot, devices_obj);
-
-    for(uint32_t i = 0; i < bridgebot_user->device_count; i++) {
-        cJSON * to_add;
-        if(i == bridgebot_user->device_count - 1) {
-            to_add = cont;
+    while(1) {
+        errno = 0;
+        rwres = getline(&user_id, &user_id_cap, f);
+        if(rwres < 0) {
+            assert(errno == 0);
+            break;
         }
-        else {
-            /* wasteful. improve later. */
-            to_add = unwrap_cjson(cJSON_Duplicate(cont, true));
+        assert(rwres > 0);
+        assert(user_id[rwres - 1] == '\n');
+
+        size_t decoded_len = base64_decode(user_id, rwres - 1);
+        user_id[decoded_len] = '\0';
+
+        if(0 == strcmp(user_id, user_id_to_find)) {
+            found = true;
+            break;
         }
-        cJSON_AddItemToObjectCS(devices_obj, bridgebot_user->devices[i].device_id, to_add);
     }
 
-    char * request_json_str = cJSON_PrintUnformatted(key_request_full);
-    assert(request_json_str);
+    free(user_id);
 
-    cJSON_Delete(key_request_full);
-    if(bridgebot_user->device_count == 0) cJSON_Delete(cont);
+    return found;
+}
+
+static void room_decrypting_continue_with_bridgebot(beeper_task_t * t, room_t * room, room_decrypting_t * decrypting)
+{
+    int res;
+
+    decrypting->state = ROOM_DECRYPTING_STATE_SESSION;
+
+    char * unavailables_path = room_session_unavailable_make_path(t, room, decrypting->session_id);
+    debug("fopen: '%s' r", unavailables_path);
+    FILE * f = fopen(unavailables_path, "r");
+    free(unavailables_path);
+    if(f) {
+        bool found = room_session_unavailable_search(f, room->bridgebot);
+
+        res = fclose(f);
+        assert(res == 0);
+
+        if(found) {
+            return;
+        }
+    }
+    else {
+        assert(errno == ENOENT);
+    }
+
+    char * request_json_str;
+    res = asprintf(&request_json_str,
+        "{"
+            "\"messages\":{"
+                "\"%s\":{"
+                    "\"*\":{" /* "*" means send to all known devices for the user */
+                        "\"action\":\"request\","
+                        "\"body\":{"
+                            "\"algorithm\":\"m.megolm.v1.aes-sha2\","
+                            "\"room_id\":\"%s\","
+                            "\"sender_key\":\"%s\","
+                            "\"session_id\":\"%s\""
+                        "},"
+                        "\"request_id\":\""TXNID_FMT"\","
+                        "\"requesting_device_id\":\"%s\""
+                    "}"
+                "}"
+            "}"
+        "}",
+        room->bridgebot,
+        room->room_id,
+        decrypting->sender_key,
+        decrypting->session_id,
+        txnid_next(t),
+        t->device_id
+    );
+    assert(res > 0);
 
     char path[SENDTODEVICE_PATH_SIZE("m.room_key_request") + 1];
     snprintf(path, sizeof(path), SENDTODEVICE_PATH_FMT("m.room_key_request"), txnid_next(t));
@@ -3711,6 +3777,42 @@ static void * thread(void * arg)
                                     }
                                     cJSON_Delete(olm_payload);
                                     denied:
+                                }
+                                else if(0 == strcmp(type, "m.room_key.withheld")) {
+                                    __label__ denied;
+                                    char * code = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(content, "code"));
+                                    if(!code || 0 != strcmp(code, "m.unavailable")) goto denied;
+                                    char * algorithm = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(content, "algorithm"));
+                                    if(!algorithm || 0 != strcmp(algorithm, "m.megolm.v1.aes-sha2")) goto denied;
+                                    char * room_id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(content, "room_id"));
+                                    if(!room_id) goto denied;
+                                    room_t * room = beeper_dict_get(&room_dict, room_id);
+                                    if(!room) goto denied;
+                                    char * session_id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(content, "session_id"));
+                                    if(!session_id) goto denied;
+                                    char * unavailables_path = room_session_unavailable_make_dirs_and_path(t, room, session_id);
+                                    debug("fopen: '%s' a+", unavailables_path);
+                                    FILE * f = fopen(unavailables_path, "a+");
+                                    assert(f);
+                                    free(unavailables_path);
+                                    res = fseek(f, 0, SEEK_SET);
+                                    assert(res == 0);
+                                    if(!room_session_unavailable_search(f, sender)) {
+                                        res = fseek(f, 0, SEEK_END);
+                                        assert(res == 0);
+                                        char * b64_sender = base64_encode(sender);
+                                        res = fputs(b64_sender, f);
+                                        assert(res != EOF);
+                                        free(b64_sender);
+                                        res = putc('\n', f);
+                                        assert(res != EOF);
+                                    }
+                                    res = fclose(f);
+                                    assert(res == 0);
+                                    denied:
+                                }
+                                else if(0 == strcmp(type, "org.matrix.room_key.withheld")) {
+                                    /* suppress the "unhandled to-device message" debug log */
                                 }
                                 else {
                                     debug("unhandled to-device message: %.*s", len, capture);
