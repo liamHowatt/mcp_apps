@@ -249,6 +249,150 @@ typedef struct {
 
 #define TXNID_INCREMNET 0x10000ull
 
+/*
+{
+  "account_data": {
+    "types": []
+  },
+  "event_fields": [
+    "type",
+    "sender",
+    "content.methods",
+    "content.timestamp",
+    "content.transaction_id",
+    "content.from_device",
+    "content.method",
+    "content.hashes",
+    "content.key_agreement_protocols",
+    "content.message_authentication_codes",
+    "content.short_authentication_string",
+    "content.key",
+    "content.mac",
+    "content.keys",
+    "content.algorithm",
+    "content.ciphertext",
+    "content.body",
+    "content.type",
+    "content.sender_key",
+    "content.code",
+    "content.room_id",
+    "content.session_id",
+    "content.membership",
+    "content.session_key",
+    "state_key",
+    "content.displayname",
+    "content.alias",
+    "content.name",
+    "event_id",
+    "sender",
+    "origin_server_ts",
+    "content.bridgebot"
+  ],
+  "presence": {
+    "types": []
+  },
+  "room": {
+    "account_data": {
+      "types": []
+    },
+    "ephemeral": {
+      "types": []
+    },
+    "state": {
+      "types": [
+        "m.room.member",
+        "m.room.canonical_alias",
+        "m.room.name",
+        "m.room.message",
+        "m.room.encrypted",
+        "m.bridge"
+      ]
+    },
+    "timeline": {
+      "types": [
+        "m.room.member",
+        "m.room.canonical_alias",
+        "m.room.name",
+        "m.room.message",
+        "m.room.encrypted",
+        "m.bridge"
+      ]
+    }
+  }
+}
+*/
+#define FILTER_DEFINITION \
+"{" \
+  "\"account_data\":{" \
+    "\"types\":[]" \
+  "}," \
+  "\"event_fields\":[" \
+    "\"type\"," \
+    "\"sender\"," \
+    "\"content.methods\"," \
+    "\"content.timestamp\"," \
+    "\"content.transaction_id\"," \
+    "\"content.from_device\"," \
+    "\"content.method\"," \
+    "\"content.hashes\"," \
+    "\"content.key_agreement_protocols\"," \
+    "\"content.message_authentication_codes\"," \
+    "\"content.short_authentication_string\"," \
+    "\"content.key\"," \
+    "\"content.mac\"," \
+    "\"content.keys\"," \
+    "\"content.algorithm\"," \
+    "\"content.ciphertext\"," \
+    "\"content.body\"," \
+    "\"content.type\"," \
+    "\"content.sender_key\"," \
+    "\"content.code\"," \
+    "\"content.room_id\"," \
+    "\"content.session_id\"," \
+    "\"content.membership\"," \
+    "\"content.session_key\"," \
+    "\"state_key\"," \
+    "\"content.displayname\"," \
+    "\"content.alias\"," \
+    "\"content.name\"," \
+    "\"event_id\"," \
+    "\"sender\"," \
+    "\"origin_server_ts\"," \
+    "\"content.bridgebot\"" \
+  "]," \
+  "\"presence\":{" \
+    "\"types\":[]" \
+  "}," \
+  "\"room\":{" \
+    "\"account_data\":{" \
+      "\"types\":[]" \
+    "}," \
+    "\"ephemeral\":{" \
+      "\"types\":[]" \
+    "}," \
+    "\"state\":{" \
+      "\"types\":[" \
+        "\"m.room.member\"," \
+        "\"m.room.canonical_alias\"," \
+        "\"m.room.name\"," \
+        "\"m.room.message\"," \
+        "\"m.room.encrypted\"," \
+        "\"m.bridge\"" \
+      "]" \
+    "}," \
+    "\"timeline\":{" \
+      "\"types\":[" \
+        "\"m.room.member\"," \
+        "\"m.room.canonical_alias\"," \
+        "\"m.room.name\"," \
+        "\"m.room.message\"," \
+        "\"m.room.encrypted\"," \
+        "\"m.bridge\"" \
+      "]" \
+    "}" \
+  "}" \
+"}"
+
 #define REQUEST_RETRY_COUNT 1
 #define HEADERS_ALLOC_CHUNK_SZ 1000
 #define DUMMY_BUF_SIZE 64
@@ -856,6 +1000,7 @@ static char * request(beeper_task_https_conn_t * conn, const char * method, cons
         char * resp = NULL;
         succeeded = request_recv(conn, NULL, true, NULL, true, save_response ? &resp : NULL, true, NULL);
         if(!succeeded) continue;
+        assert(resp || !save_response);
         return resp;
     }
 }
@@ -2847,7 +2992,6 @@ static void * thread(void * arg)
     cJSON_Delete(login_json);
 
     char * resp_str = request(&t->https_conn[0], "POST", "login", NULL, login_json_str, true);
-    assert(resp_str);
     free(login_json_str);
     cJSON * resp_json = unwrap_cjson(cJSON_Parse(resp_str));
     free(resp_str);
@@ -2991,8 +3135,63 @@ static void * thread(void * arg)
     bool is_verified = device_key_status_res == BEEPER_TASK_DEVICE_KEY_STATUS_IS_VERIFIED;
     t->event_cb(BEEPER_TASK_EVENT_VERIFICATION_STATUS, (void *)(uintptr_t)is_verified, t->event_cb_user_data);
 
+    char * filter_id;
+
+    char * filter_path;
+    res = asprintf(&filter_path, "%sfilter", t->upath);
+    assert(res > 0);
+    debug("open: '%s' RDONLY", filter_path);
+    char * filter_file_cont = beeper_read_text_file(filter_path);
+    bool do_create_filter = false;
+    if(filter_file_cont) {
+        char * delim = strchr(filter_file_cont, '\n');
+        assert(delim);
+        if(0 == strcmp(FILTER_DEFINITION, delim + 1)) {
+            size_t filter_id_len = base64_decode(filter_file_cont, delim - filter_file_cont);
+            filter_file_cont[filter_id_len] = '\0';
+            filter_id = beeper_asserting_realloc(filter_file_cont, filter_id_len + 1);
+        }
+        else {
+            do_create_filter = true;
+            free(filter_file_cont);
+        }
+    }
+    else do_create_filter = true;
+    if(do_create_filter) {
+        char * filter_upload_request_path;
+        res = asprintf(&filter_upload_request_path, "user/%s/filter", t->user_id);
+        assert(res > 0);
+        char * filter_resp = request(&t->https_conn[0], "POST", filter_upload_request_path, t->auth_header, FILTER_DEFINITION, true);
+        free(filter_upload_request_path);
+        cJSON * filter_resp_json = unwrap_cjson(cJSON_Parse(filter_resp));
+        free(filter_resp);
+        filter_id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(filter_resp_json, "filter_id"));
+        assert(filter_id);
+        filter_id = beeper_asserting_strdup(filter_id);
+        cJSON_Delete(filter_resp_json);
+
+        debug("fopen: '%s' w", filter_path);
+        FILE * f = fopen(filter_path, "w");
+        assert(f);
+        char * filter_id_encoded = base64_encode(filter_id);
+        res = fputs(filter_id_encoded, f);
+        assert(res != EOF);
+        free(filter_id_encoded);
+        res = putc('\n', f);
+        assert(res != EOF);
+        res = fputs(FILTER_DEFINITION, f);
+        assert(res != EOF);
+        res = fclose(f);
+        assert(res == 0);
+    }
+    free(filter_path);
+
     https_conn_init(&t->https_ctx, &t->https_conn[1]);
-    request_send(&t->https_conn[1], "GET", "sync?timeout=30000", t->auth_header, NULL, false);
+
+    char * sync_path;
+    assert(-1 != asprintf(&sync_path, "sync?timeout=30000&filter=%s", filter_id));
+    request_send(&t->https_conn[1], "GET", sync_path, t->auth_header, NULL, false);
+    free(sync_path);
 
     enum { SAS_STEP_REQUEST, SAS_STEP_START, SAS_STEP_KEY,
            SAS_STEP_MAC_NEED_MATCH_AND_MAC, SAS_STEP_MAC_NEED_MATCH, SAS_STEP_MAC_NEED_MAC,
@@ -4063,7 +4262,7 @@ static void * thread(void * arg)
 
             assert(next_batch);
             char * sync_path_with_since;
-            assert(-1 != asprintf(&sync_path_with_since, "sync?timeout=30000&since=%s", next_batch));
+            assert(-1 != asprintf(&sync_path_with_since, "sync?timeout=30000&filter=%s&since=%s", filter_id, next_batch));
             free(next_batch);
             request_send(&t->https_conn[1], "GET", sync_path_with_since, t->auth_header, NULL, false);
             free(sync_path_with_since);
@@ -4086,6 +4285,8 @@ static void * thread(void * arg)
     free(sas_olm_sas);
     free(sas_device_id);
     free(sas_txid);
+
+    free(filter_id);
 
     key_list_destroy(t);
 
