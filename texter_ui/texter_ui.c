@@ -53,6 +53,7 @@ struct texter_ui_t {
     texter_ui_convo_t * active_convo;
     bool * event_cb_stop_ptr;
     bool scroll_is_updating;
+    bool show_keyboard;
 };
 
 struct texter_ui_convo_t {
@@ -87,6 +88,7 @@ static lv_obj_t * create_view(lv_obj_t * parent);
 static void convo_back_btn_clicked_cb(lv_event_t * e);
 static void convo_send_btn_clicked_cb(lv_event_t * e);
 static void convo_menuitem_clicked_cb(lv_event_t * e);
+static void close_keyboard_cb(lv_event_t * e);
 static void event_timer_cb(lv_timer_t * event_timer);
 static void scroll_event_cb(lv_event_t * e);
 static void update_scroll(texter_ui_t * x);
@@ -150,6 +152,14 @@ texter_ui_t * texter_ui_create(lv_obj_t * base_obj, texter_ui_event_cb_t event_c
     x->user_data = user_data;
 
     list_init(&x->event_list);
+
+    lv_indev_t * indev = NULL;
+    while((indev = lv_indev_get_next(indev))) {
+        if(lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER) {
+            x->show_keyboard = true;
+            break;
+        }
+    }
 
     x->event_timer = lv_timer_create(event_timer_cb, 0, x);
     lv_timer_pause(x->event_timer);
@@ -591,6 +601,13 @@ static void convo_menuitem_clicked_cb(lv_event_t * e)
     lv_obj_add_event_cb(send_btn, convo_send_btn_clicked_cb, LV_EVENT_CLICKED, convo);
     lv_obj_add_style(send_btn, &focus_style_1, LV_STATE_FOCUS_KEY);
     lv_group_add_obj(lv_group_get_default(), send_btn);
+    if(x->show_keyboard) {
+        lv_obj_t * kb = lv_keyboard_create(view);
+        lv_keyboard_set_popovers(kb, true);
+        lv_keyboard_set_textarea(kb, compose_ta);
+        lv_obj_add_event_cb(kb, close_keyboard_cb, LV_EVENT_CANCEL, NULL);
+        lv_obj_add_event_cb(kb, convo_send_btn_clicked_cb, LV_EVENT_READY, convo);
+    }
 
     lv_group_focus_obj(compose_ta);
 
@@ -606,6 +623,12 @@ static void convo_menuitem_clicked_cb(lv_event_t * e)
 
         update_scroll(x);
     }
+}
+
+static void close_keyboard_cb(lv_event_t * e)
+{
+    lv_obj_t * kb = lv_event_get_target_obj(e);
+    lv_obj_delete(kb);
 }
 
 static void event_timer_cb(lv_timer_t * event_timer) {
