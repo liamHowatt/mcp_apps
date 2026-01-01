@@ -14,8 +14,10 @@
 
 #include <mcp/mcp_lvgl.h>
 
-#define ROOM_SESSION_LRU_COUNT 4
+#define INBOUND_SESSION_LRU_COUNT 16
 #define USER_SESSION_LRU_COUNT 4
+
+typedef struct room_t room_t;
 
 typedef struct {
     WOLFSSL_CTX * wolfssl_ctx;
@@ -144,12 +146,13 @@ typedef struct {
 
 typedef struct {
     char * session_id;
+    room_t * room;
     char * pickle;
     OlmInboundGroupSession * session;
     bool needs_save;
 } room_session_t;
 
-typedef struct {
+typedef struct room_t {
     char * room_id;
     bool dir_created;
     room_name_type_t name_type;
@@ -157,13 +160,17 @@ typedef struct {
     beeper_array_t members;
     beeper_array_t decrypting;
     char * bridgebot;
-    room_session_t session_lru[ROOM_SESSION_LRU_COUNT];
 } room_t;
 
 typedef struct {
-    beeper_task_t * t;
+    char * room_id;
     room_t * room;
-} room_session_lru_user_data_t;
+} room_dict_ent_t;
+
+typedef struct {
+    const char * session_id;
+    room_t * room;
+} room_session_lru_cmp_user_data_t;
 
 typedef struct {
     char * user_id;
@@ -193,6 +200,7 @@ struct beeper_task_t {
     char * identity_key_ed25519;
     char * outbound_session_room_id;
     OlmOutboundGroupSession * outbound_session;
+    room_session_t inbound_session_lru[INBOUND_SESSION_LRU_COUNT];
 
     bool user_sessions_dir_created;
     bool rooms_dir_created;
@@ -1999,7 +2007,7 @@ static char * room_session_unavailable_make_dirs_and_path(beeper_task_t * t, roo
     return room_session_unavailable_make_path(t, room, session_id);
 }
 
-static void room_session_save(beeper_task_t * t, room_t * room, room_session_t * session)
+static void room_session_save(beeper_task_t * t, room_session_t * session)
 {
     if(!session->needs_save) {
         return;
@@ -2021,7 +2029,7 @@ static void room_session_save(beeper_task_t * t, room_t * room, room_session_t *
     free(session->pickle);
     session->pickle = pickle;
 
-    char * session_path = room_session_make_dirs_and_path(t, room, session->session_id);
+    char * session_path = room_session_make_dirs_and_path(t, session->room, session->session_id);
 
     debug("open: '%s' CREAT TRUNC WRONLY", session_path);
     int fd = open(session_path, O_CREAT | O_TRUNC | O_WRONLY, 0666);
@@ -2036,10 +2044,10 @@ static void room_session_save(beeper_task_t * t, room_t * room, room_session_t *
 static void room_session_destroy(void * session_v, void * user_data)
 {
     room_session_t * session = session_v;
-    room_session_lru_user_data_t * ud = user_data;
+    beeper_task_t * t = user_data;
 
     if(session->session_id) {
-        room_session_save(ud->t, ud->room, session);
+        room_session_save(t, session);
 
         free(session->session_id);
         free(session->pickle);
@@ -2051,13 +2059,13 @@ static void room_session_destroy(void * session_v, void * user_data)
 static bool room_session_cmp(void * session_v, void * user_data)
 {
     room_session_t * session = session_v;
-    char * session_id = user_data;
+    room_session_lru_cmp_user_data_t * ud = user_data;
 
-    return session->session_id && 0 == strcmp(session_id, session->session_id);
+    return session->session_id && ud->room == session->room && 0 == strcmp(ud->session_id, session->session_id);
 }
 
-static const beeper_lru_class_t room_session_lru_class = {
-    .capacity = ROOM_SESSION_LRU_COUNT,
+static const beeper_lru_class_t inbound_session_lru_class = {
+    .capacity = INBOUND_SESSION_LRU_COUNT,
     .item_size = sizeof(room_session_t),
     .destroy = room_session_destroy,
     .cmp = room_session_cmp,
@@ -2065,9 +2073,11 @@ static const beeper_lru_class_t room_session_lru_class = {
 
 static void room_create(void * room_v, void * user_data)
 {
-    room_t * room = room_v;
+    room_dict_ent_t * room_dict_ent = room_v;
     beeper_task_t * t = user_data;
-    beeper_dict_item_memzero(room, sizeof(*room));
+    room_t * room = beeper_asserting_calloc(1, sizeof(*room));
+    room_dict_ent->room = room;
+    room->room_id = room_dict_ent->room_id;
     room->name_type = ROOM_NAME_TYPE_MEMBERS;
     beeper_array_init(&room->members, sizeof(room_member_t));
     beeper_array_init(&room->decrypting, sizeof(room_decrypting_t));
@@ -2092,14 +2102,13 @@ static void room_decrypting_destroy(void * decrypting_v, void * user_data)
 
 static void room_destroy(void * room_v, void * user_data)
 {
-    room_t * room = room_v;
-    beeper_task_t * t = user_data;
-    room_session_lru_user_data_t lru_user_data = {.t = t, .room = room};
-    beeper_lru_destroy(&room_session_lru_class, room->session_lru, &lru_user_data);
+    room_dict_ent_t * room_dict_ent = room_v;
+    room_t * room = room_dict_ent->room;
     free(room->name);
     beeper_dict_destroy(&room->members, room_member_destroy, NULL);
     beeper_array_destroy_custom(&room->decrypting, room_decrypting_destroy, NULL);
     free(room->bridgebot);
+    free(room);
 }
 
 static char * room_session_decrypt(room_session_t * session, const char * ciphertext)
@@ -2259,7 +2268,8 @@ static char * room_decrypt_message(beeper_task_t * t, room_t * room, cJSON * enc
         return NULL;
     }
 
-    room_session_t * session = beeper_lru_get(&room_session_lru_class, room->session_lru, session_id);
+    room_session_lru_cmp_user_data_t cmp_ud = { .session_id = session_id, .room = room };
+    room_session_t * session = beeper_lru_get(&inbound_session_lru_class, t->inbound_session_lru, &cmp_ud);
 
     if(!session) {
         char * session_path = room_session_make_dirs_and_path(t, room, session_id);
@@ -2267,9 +2277,9 @@ static char * room_decrypt_message(beeper_task_t * t, room_t * room, cJSON * enc
         char * pickle = beeper_read_text_file(session_path);
         free(session_path);
         if(pickle) {
-            room_session_lru_user_data_t lru_user_data = {.t = t, .room = room};
-            session = beeper_lru_add_unchecked(&room_session_lru_class, room->session_lru, NULL, &lru_user_data);
+            session = beeper_lru_add_unchecked(&inbound_session_lru_class, t->inbound_session_lru, NULL, t);
             session->session_id = beeper_asserting_strdup(session_id);
+            session->room = room;
             session->pickle = beeper_asserting_strdup(pickle),
             session->session = beeper_asserting_malloc(olm_inbound_group_session_size()),
             session->needs_save = false,
@@ -2314,12 +2324,15 @@ static char * room_decrypt_message(beeper_task_t * t, room_t * room, cJSON * enc
 
 static void room_save_sessions(beeper_task_t * t, room_t * room)
 {
-    for(size_t i = 0; i < ARRAY_LEN(room->session_lru); i++) {
-        room_session_t * session = &room->session_lru[i];
+    for(size_t i = 0; i < ARRAY_LEN(t->inbound_session_lru); i++) {
+        room_session_t * session = &t->inbound_session_lru[i];
         if(!session->session_id) {
             return;
         }
-        room_session_save(t, room, session);
+        if(session->room != room) {
+            continue;
+        }
+        room_session_save(t, session);
     }
 }
 
@@ -2349,14 +2362,14 @@ static void handle_room_key_event(beeper_task_t * t, beeper_array_t * room_dict,
     char * session_key = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(content, "session_key"));
     assert(session_key);
 
-    room_t * room = beeper_dict_get_create(room_dict, room_id, room_create, NULL, t);
+    room_t * room = ((room_dict_ent_t *) beeper_dict_get_create(room_dict, room_id, room_create, NULL, t))->room;
 
     room_decrypting_t * decrypting = beeper_dict_get(&room->decrypting, session_id);
     if(decrypting) {
 
-        room_session_lru_user_data_t lru_user_data = {.t = t, .room = room};
-        room_session_t * session = beeper_lru_add_unchecked(&room_session_lru_class, room->session_lru, NULL, &lru_user_data);
+        room_session_t * session = beeper_lru_add_unchecked(&inbound_session_lru_class, t->inbound_session_lru, NULL, t);
         session->session_id = decrypting->session_id; /* take ownership */
+        session->room = room;
         decrypting->session_id = NULL;
         session->pickle = NULL;
         session->session = beeper_asserting_malloc(olm_inbound_group_session_size());
@@ -2390,12 +2403,13 @@ static void handle_room_key_event(beeper_task_t * t, beeper_array_t * room_dict,
         room_decrypting_destroy(decrypting, NULL);
         beeper_array_remove_item(&room->decrypting, decrypting);
 
-        room_session_save(t, room, session);
+        room_session_save(t, session);
 
         return;
     }
 
-    if(beeper_lru_get_no_rearrange(&room_session_lru_class, room->session_lru, session_id)) {
+    room_session_lru_cmp_user_data_t cmp_ud = { .session_id = session_id, .room = room };
+    if(beeper_lru_get_no_rearrange(&inbound_session_lru_class, t->inbound_session_lru, &cmp_ud)) {
         return;
     }
 
@@ -2410,9 +2424,9 @@ static void handle_room_key_event(beeper_task_t * t, beeper_array_t * room_dict,
     }
     assert(errno == ENOENT);
 
-    room_session_lru_user_data_t lru_user_data = {.t = t, .room = room};
-    room_session_t * session = beeper_lru_add_unchecked(&room_session_lru_class, room->session_lru, NULL, &lru_user_data);
+    room_session_t * session = beeper_lru_add_unchecked(&inbound_session_lru_class, t->inbound_session_lru, NULL, t);
     session->session_id = beeper_asserting_strdup(session_id);
+    session->room = room;
     session->pickle = NULL;
     session->session = beeper_asserting_malloc(olm_inbound_group_session_size());
     olm_inbound_group_session(session->session);
@@ -2422,7 +2436,7 @@ static void handle_room_key_event(beeper_task_t * t, beeper_array_t * room_dict,
     free(session_key_buf);
     session->needs_save = true;
 
-    room_session_save(t, room, session);
+    room_session_save(t, session);
 }
 
 static bool room_event_can_be_used_to_init_message_data(cJSON * room_event)
@@ -2990,7 +3004,7 @@ static void * thread(void * arg)
     cJSON * sas_peer_mac_content = NULL;
 
     beeper_array_t room_dict;
-    beeper_array_init(&room_dict, sizeof(room_t));
+    beeper_array_init(&room_dict, sizeof(room_dict_ent_t));
 
     struct pollfd pfd[2] = {
         {.fd = https_fd(&t->https_conn[1])},
@@ -3131,9 +3145,9 @@ static void * thread(void * arg)
             else if(e == BEEPER_TASK_RECEIVED_EVENT_REQUEST_MESSAGES) {
                 beeper_received_message_request_t * msgs_req_ev = queue_item.data;
 
-                bool was_created;
-                room_t * room = beeper_dict_get_create(&room_dict, msgs_req_ev->room_id, room_create, &was_created, t);
-                assert(!was_created);
+                room_dict_ent_t * room_dict_ent = beeper_dict_get(&room_dict, msgs_req_ev->room_id);
+                assert(room_dict_ent);
+                room_t * room = room_dict_ent->room;
 
                 char * path;
                 if(msgs_req_ev->chunk_id) {
@@ -3201,9 +3215,9 @@ static void * thread(void * arg)
             else if(e == BEEPER_TASK_RECEIVED_EVENT_SEND_TEXT) {
                 beeper_received_send_text_t * send_text = queue_item.data;
 
-                bool was_created;
-                room_t * room = beeper_dict_get_create(&room_dict, send_text->room_id, room_create, &was_created, t);
-                assert(!was_created);
+                room_dict_ent_t * room_dict_ent = beeper_dict_get(&room_dict, send_text->room_id);
+                assert(room_dict_ent);
+                room_t * room = room_dict_ent->room;
 
                 char * encoded_room_id = base64_encode(send_text->room_id);
                 base64_filename_safe(encoded_room_id);
@@ -3265,9 +3279,9 @@ static void * thread(void * arg)
 
                         /* make the inbound version too */
 
-                        room_session_lru_user_data_t lru_user_data = {.t = t, .room = room};
-                        room_session_t * session = beeper_lru_add_unchecked(&room_session_lru_class, room->session_lru, NULL, &lru_user_data);
+                        room_session_t * session = beeper_lru_add_unchecked(&inbound_session_lru_class, t->inbound_session_lru, NULL, t);
                         session->session_id = beeper_asserting_strdup(session_id);
+                        session->room = room;
                         session->pickle = NULL;
                         session->session = beeper_asserting_malloc(olm_inbound_group_session_size());
                         olm_inbound_group_session(session->session);
@@ -3276,7 +3290,7 @@ static void * thread(void * arg)
                         assert(olm_res != olm_error());
                         free(session_key_buf);
                         session->needs_save = true;
-                        room_session_save(t, room, session);
+                        room_session_save(t, session);
 
                         /* send it to the bridgebot */
 
@@ -3786,7 +3800,7 @@ static void * thread(void * arg)
                                     if(!algorithm || 0 != strcmp(algorithm, "m.megolm.v1.aes-sha2")) goto denied;
                                     char * room_id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(content, "room_id"));
                                     if(!room_id) goto denied;
-                                    room_t * room = beeper_dict_get(&room_dict, room_id);
+                                    room_t * room = ((room_dict_ent_t *) beeper_dict_get(&room_dict, room_id))->room;
                                     if(!room) goto denied;
                                     char * session_id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(content, "session_id"));
                                     if(!session_id) goto denied;
@@ -3831,7 +3845,7 @@ static void * thread(void * arg)
                             assert(json_next(&pdjson) == JSON_OBJECT);
                             while(while_object(&pdjson, &object_key_string)) {
                                 debug("room: %s", object_key_string);
-                                room_t * room = beeper_dict_get_create(&room_dict, object_key_string, room_create, NULL, t);
+                                room_t * room = ((room_dict_ent_t *) beeper_dict_get_create(&room_dict, object_key_string, room_create, NULL, t))->room;
                                 assert(JSON_OBJECT == json_next(&pdjson));
                                 while(while_object(&pdjson, &object_key_string)) {
                                     matrix_joined_room_t joined_room_obj_type = MATRIX_JOINED_ROOM_NULL;
@@ -4061,7 +4075,9 @@ static void * thread(void * arg)
         assert(res > 0);
     }
 
-    beeper_dict_destroy(&room_dict, room_destroy, t);
+    beeper_lru_destroy(&inbound_session_lru_class, t->inbound_session_lru, t);
+
+    beeper_dict_destroy(&room_dict, room_destroy, NULL);
 
     cJSON_Delete(sas_peer_mac_content);
     if(sas_olm_sas) olm_clear_sas(sas_olm_sas);
