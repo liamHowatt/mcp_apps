@@ -3925,33 +3925,35 @@ static void * thread(void * arg)
                                                                             char * user_id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(
                                                                                 room_event, "state_key"));
                                                                             assert(user_id);
-                                                                            char * display_name = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(
-                                                                                content, "displayname"));
-                                                                            room_member_t * room_member = beeper_dict_get_create(&room->members, user_id, room_member_create, &was_created, NULL);
-                                                                            bool display_name_unchanged = !was_created && ((display_name == NULL && room_member->display_name == NULL)
-                                                                                                                        || (display_name && room_member->display_name && 0 == strcmp(display_name, room_member->display_name)));
-                                                                            if(!display_name_unchanged) {
-                                                                                free(room_member->display_name);
-                                                                                room_member->display_name = display_name ? beeper_asserting_strdup(display_name) : NULL;
+                                                                            if(0 != strcmp(user_id, t->user_id)) {
+                                                                                char * display_name = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(
+                                                                                    content, "displayname"));
+                                                                                room_member_t * room_member = beeper_dict_get_create(&room->members, user_id, room_member_create, &was_created, NULL);
+                                                                                bool display_name_unchanged = !was_created && ((display_name == NULL && room_member->display_name == NULL)
+                                                                                                                            || (display_name && room_member->display_name && 0 == strcmp(display_name, room_member->display_name)));
+                                                                                if(!display_name_unchanged) {
+                                                                                    free(room_member->display_name);
+                                                                                    room_member->display_name = display_name ? beeper_asserting_strdup(display_name) : NULL;
 
-                                                                                size_t room_member_count = beeper_array_len(&room->members);
-                                                                                room_member_t * room_members = beeper_array_data(&room->members);
-                                                                                size_t title_size = (room_member_count - 1) * 2 + 1;
-                                                                                for(size_t i = 0; i < room_member_count; i++)
-                                                                                    title_size += strlen(room_members[i].display_name ? room_members[i].display_name : room_members[i].user_id);
-                                                                                char * title = beeper_asserting_malloc(title_size);
-                                                                                char * title_p = title;
-                                                                                for(size_t i = 0; i < room_member_count; i++) {
-                                                                                    char * part = room_members[i].display_name ? room_members[i].display_name : room_members[i].user_id;
-                                                                                    title_p = stpcpy(title_p, part);
-                                                                                    if(i + 1 < room_member_count) {
-                                                                                        title_p[0] = ',';
-                                                                                        title_p[1] = ' ';
-                                                                                        title_p += 2;
+                                                                                    size_t room_member_count = beeper_array_len(&room->members);
+                                                                                    room_member_t * room_members = beeper_array_data(&room->members);
+                                                                                    size_t title_size = (room_member_count - 1) * 2 + 1;
+                                                                                    for(size_t i = 0; i < room_member_count; i++)
+                                                                                        title_size += strlen(room_members[i].display_name ? room_members[i].display_name : room_members[i].user_id);
+                                                                                    char * title = beeper_asserting_malloc(title_size);
+                                                                                    char * title_p = title;
+                                                                                    for(size_t i = 0; i < room_member_count; i++) {
+                                                                                        char * part = room_members[i].display_name ? room_members[i].display_name : room_members[i].user_id;
+                                                                                        title_p = stpcpy(title_p, part);
+                                                                                        if(i + 1 < room_member_count) {
+                                                                                            title_p[0] = ',';
+                                                                                            title_p[1] = ' ';
+                                                                                            title_p += 2;
+                                                                                        }
                                                                                     }
+                                                                                    room_title_event_send(t, room->room_id, title);
+                                                                                    free(title);
                                                                                 }
-                                                                                room_title_event_send(t, room->room_id, title);
-                                                                                free(title);
                                                                             }
                                                                         }
                                                                     }
