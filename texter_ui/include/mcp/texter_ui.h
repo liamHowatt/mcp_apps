@@ -37,6 +37,7 @@ void * texter_ui_convo_get_user_data(texter_ui_convo_t * convo);
 void texter_ui_convo_delete(texter_ui_convo_t * convo);
 void texter_ui_convo_set_title(texter_ui_convo_t * convo, const char * text);
 void texter_ui_convo_set_menu_position(texter_ui_convo_t * convo, int32_t position);
+void texter_ui_convo_set_menu_position_relative(texter_ui_convo_t * convo, int32_t position);
 void texter_ui_convo_set_sending_enabled(texter_ui_convo_t * convo, bool enabled);
 
 texter_ui_future_t * texter_ui_event_get_future(texter_ui_event_t * e);

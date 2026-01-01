@@ -307,6 +307,11 @@ void texter_ui_convo_set_menu_position(texter_ui_convo_t * convo, int32_t positi
     lv_obj_move_to_index(convo->menuitem, position);
 }
 
+void texter_ui_convo_set_menu_position_relative(texter_ui_convo_t * convo, int32_t position)
+{
+    lv_obj_move_to_index(convo->menuitem, lv_obj_get_index(convo->menuitem) + position);
+}
+
 void texter_ui_convo_set_sending_enabled(texter_ui_convo_t * convo, bool enabled)
 {
     convo->sending_disabled = !enabled;

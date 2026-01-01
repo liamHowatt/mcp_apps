@@ -23,6 +23,7 @@ typedef struct {
     beeper_ll_t link; /* shall be first */
     char * room_id;
     texter_ui_convo_t * x_convo;
+    uint64_t newest_timestamp;
     beeper_ll_t msg_list;
     ui_message_t * bubble_top;
     ui_message_t * bubble_bottom;

@@ -117,6 +117,22 @@ static void queue_poll_cb(mcp_lvgl_poll_t * handle, int fd, uint32_t revents, vo
                 beeper_task_messages_event_data_t * m = item.event_data;
                 ui_room_t * room = room_get_create(c, m->room_id);
 
+                /* reposition this room based on its largest timestamp */
+                for(uint32_t i = 0; i < m->message_count; i++) {
+                    if(m->messages[i].timestamp > room->newest_timestamp) room->newest_timestamp = m->messages[i].timestamp;
+                }
+                int32_t moved_by = 0;
+                ui_room_t * room_above = (ui_room_t *) beeper_ll_list_link_up(&c->room_list, &room->link);
+                while(room_above && room_above->newest_timestamp < room->newest_timestamp) {
+                    room_above = (ui_room_t *) beeper_ll_list_link_up(&c->room_list, &room_above->link);
+                    moved_by--;
+                }
+                if(moved_by) {
+                    beeper_ll_link_remove(&room->link);
+                    beeper_ll_list_link_insert_below(&c->room_list, &room->link, &room_above->link);
+                    texter_ui_convo_set_menu_position_relative(room->x_convo, moved_by);
+                }
+
                 /* decide whether to incorporate this chunk */
                 bool process = false;
 
