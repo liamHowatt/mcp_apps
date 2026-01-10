@@ -27,6 +27,9 @@
 #ifdef CONFIG_MCP_APPS_TEXTER_UI_DEMO
 #include <mcp/texter_ui.h>
 #endif
+#ifdef CONFIG_MCP_APPS_TERMINAL
+#include <mcp/terminal.h>
+#endif
 
 #include <lvgl/lvgl.h>
 #include <lvgl/src/core/lv_global.h>
@@ -176,6 +179,9 @@ static void create_app_list(void)
 #endif
 #if APP_BENCHMARK
     app_list_helper(list, "LVGL Benchmark Demo", benchmark_app_run);
+#endif
+#if CONFIG_MCP_APPS_TERMINAL
+    app_list_helper(list, "Terminal", terminal_app_run);
 #endif
     for(int i = 0; i < ud->app_count; i++) {
         add_entry_to_app_list_obj(list, &ud->app_entries[i]);

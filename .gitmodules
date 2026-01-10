@@ -13,3 +13,6 @@
 [submodule "beeper/pdjson"]
 	path = beeper/pdjson
 	url = https://github.com/skeeto/pdjson.git
+[submodule "terminal/libtmt"]
+	path = terminal/libtmt
+	url = https://github.com/deadpixi/libtmt.git

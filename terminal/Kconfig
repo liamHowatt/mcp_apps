@@ -1,0 +1,14 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config MCP_APPS_TERMINAL
+	bool "Terminal App"
+	default n
+	depends on GRAPHICS_LVGL && PSEUDOTERM && LIBC_EXECFUNCS && SCHED_CHILD_STATUS && SIGNAL_FD
+	---help---
+		Enable the Terminal App
+
+if MCP_APPS_TERMINAL
+endif
