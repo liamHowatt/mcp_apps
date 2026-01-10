@@ -402,6 +402,10 @@ static void queue_poll_cb(mcp_lvgl_poll_t * handle, int fd, uint32_t revents, vo
                 texter_ui_convo_set_sending_enabled(room->x_convo, true);
                 free(item.event_data);
                 break;
+            case BEEPER_TASK_EVENT_BUSY_STATUS:
+                bool is_busy = item.event_data;
+                texter_ui_set_top_text(c->x, is_busy ? "Beeper " LV_SYMBOL_REFRESH : "Beeper");
+                break;
             default:
                 beeper_task_event_data_destroy(item.e, item.event_data);
         }
@@ -417,7 +421,7 @@ static void base_obj_delete_cb(lv_event_t * e)
     if(c->task) beeper_task_destroy(c->task);
     assert(0 == pthread_mutex_destroy(&c->queue_mutex));
     beeper_ui_queue_item_t item;
-    while(beeper_queue_pop(&c->queue, &item)) free(item.event_data);
+    while(beeper_queue_pop(&c->queue, &item)) beeper_task_event_data_destroy(item.e, item.event_data);
     mcp_lvgl_poll_remove(c->queue_poll_handle);
     beeper_queue_destroy(&c->queue);
 

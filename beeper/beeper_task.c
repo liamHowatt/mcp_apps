@@ -2953,6 +2953,8 @@ static void * thread(void * arg)
     size_t olm_res;
     beeper_task_t * t = arg;
 
+    t->event_cb(BEEPER_TASK_EVENT_BUSY_STATUS, (void *)(uintptr_t)true, t->event_cb_user_data);
+
     res = mkdir(t->upath, 0755);
     assert(res == 0 || errno == EEXIST);
 
@@ -4272,8 +4274,12 @@ static void * thread(void * arg)
             continue;
         }
 
+        t->event_cb(BEEPER_TASK_EVENT_BUSY_STATUS, (void *)(uintptr_t)false, t->event_cb_user_data);
+
         res = poll(pfd, 2, -1);
         assert(res > 0);
+
+        t->event_cb(BEEPER_TASK_EVENT_BUSY_STATUS, (void *)(uintptr_t)true, t->event_cb_user_data);
     }
 
     beeper_lru_destroy(&inbound_session_lru_class, t->inbound_session_lru, t);
@@ -4379,6 +4385,7 @@ void beeper_task_event_data_destroy(beeper_task_event_t e, void * event_data)
 {
     switch(e) {
         case BEEPER_TASK_EVENT_VERIFICATION_STATUS:
+        case BEEPER_TASK_EVENT_BUSY_STATUS:
             break;
         case BEEPER_TASK_EVENT_ROOM_MESSAGES: {
             beeper_task_messages_event_data_t * msgs = event_data;

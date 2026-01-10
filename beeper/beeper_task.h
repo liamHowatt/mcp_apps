@@ -44,6 +44,7 @@ typedef enum {
     BEEPER_TASK_EVENT_ROOM_MESSAGES,         /* beeper_task_messages_event_data_t */
     BEEPER_TASK_EVENT_MESSAGE_DECRYPTED,     /* beeper_task_message_decrypted_t */
     BEEPER_TASK_EVENT_SENDING_ALLOWED,       /* room_id */
+    BEEPER_TASK_EVENT_BUSY_STATUS,           /* bool */
 } beeper_task_event_t;
 
 typedef void (*beeper_task_event_cb_t)(beeper_task_event_t e, void * event_data, void * user_data);
