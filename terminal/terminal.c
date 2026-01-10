@@ -6,6 +6,7 @@
 #include <pty.h>
 #include <spawn.h>
 #include <signal.h>
+#include <errno.h>
 #include <sys/signalfd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -112,8 +113,12 @@ static void key_cb(lv_event_t * e)
     }
 
     rwres = write(ctx->master, seq, seq_len);
-    assert(rwres >= 0);
-    assert(rwres == seq_len);
+    if(rwres < 0) {
+        assert(errno == EPIPE);
+    }
+    else {
+        assert(rwres == seq_len);
+    }
 }
 
 static void click_cb(lv_event_t * e)
@@ -297,7 +302,11 @@ void master_poll_cb(mcp_lvgl_poll_t * handle, int fd, uint32_t revents, void * u
 
     ctx_t * ctx = user_data;
 
-    assert(revents == EPOLLIN);
+    if(revents != EPOLLIN) {
+        mcp_lvgl_poll_remove(ctx->master_poll_hdl);
+        ctx->master_poll_hdl = NULL;
+        return;
+    }
 
     rwres = read(fd, ctx->master_read_buf, MASTER_READ_BUF_SIZE);
     assert(rwres > 0);
@@ -350,7 +359,7 @@ static void base_obj_delete_cb(lv_event_t * e)
 
     if(ctx->term) tmt_close(ctx->term);
 
-    mcp_lvgl_poll_remove(ctx->master_poll_hdl);
+    if(ctx->master_poll_hdl) mcp_lvgl_poll_remove(ctx->master_poll_hdl);
     mcp_lvgl_poll_remove(ctx->signal_poll_hdl);
 
     res = close(ctx->master);
