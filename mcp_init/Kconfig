@@ -6,7 +6,7 @@
 config MCP_APPS_MCP_INIT
         tristate "MCP Init App"
         default n
-        depends on LIBC_EXECFUNCS
+        depends on MCP_APPS_MCPD && MCP_APPS_MCP_FS && MCP_APPS_MCP_LVGL && MCP_APPS_MCP_FORTH && LIBC_EXECFUNCS
         ---help---
                 Enable the MCP Init App
 

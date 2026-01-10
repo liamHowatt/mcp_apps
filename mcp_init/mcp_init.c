@@ -4,10 +4,12 @@
 #include <assert.h>
 #include <spawn.h>
 #include <stdlib.h>
+#include <stdbool.h>
+#include <string.h>
 
 #include <mcp/mcpd.h>
 
-static void run_forth(int peer_id)
+static void run_forth(int peer_id, bool fast)
 {
     int res;
     char path[32];
@@ -17,7 +19,11 @@ static void run_forth(int peer_id)
     char prog_name[] = "mcp_forth";
     char opt_fl[] = "-O";
     snprintf(path, sizeof(path), "/mnt/mcp/%d/main.4th", peer_id);
-    char * task_argv[] = {prog_name, opt_fl, path, NULL};
+    char * task_argv[] = {prog_name, path, NULL, NULL};
+    if(fast) {
+        task_argv[1] = opt_fl;
+        task_argv[2] = path;
+    }
 
     snprintf(peer, sizeof(peer), "%d", peer_id);
     res = setenv("MCP_PEER", peer, 1);
@@ -32,6 +38,14 @@ int mcp_init_main(int argc, char *argv[])
     int res;
     pid_t pid;
 
+    bool fast_forth = false;
+    for(int i = 1; i < argc; i++) {
+        if(0 == strcmp(argv[i], "-O")) {
+            fast_forth = true;
+            break;
+        }
+    }
+
     res = posix_spawn(&pid, "mcpd", NULL, NULL, NULL, NULL);
     assert(res >= 0);
 
@@ -40,7 +54,10 @@ int mcp_init_main(int argc, char *argv[])
 
     char prog_name[] = "mcp_lvgl";
     char opt_fl[] = "-O";
-    char * task_argv[] = {prog_name, opt_fl, NULL};
+    char * task_argv[] = {prog_name, NULL, NULL};
+    if(fast_forth) {
+        task_argv[1] = opt_fl;
+    }
     res = posix_spawn(&pid, "mcp_lvgl", NULL, NULL, task_argv, NULL);
     assert(res >= 0);
 
@@ -50,7 +67,7 @@ int mcp_init_main(int argc, char *argv[])
         int peer = mcpd_watch_wait(watch);
         assert(peer >= 0);
 
-        run_forth(peer);
+        run_forth(peer, fast_forth);
     }
 
     /* mcpd_watch_destroy(watch); */
