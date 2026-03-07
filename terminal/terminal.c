@@ -31,13 +31,14 @@ typedef struct {
     uint32_t cursor_x;
     uint32_t cursor_y;
     int master;
+    int slave;
     pid_t pid;
     int sfd;
     mcp_lvgl_poll_t * master_poll_hdl;
     mcp_lvgl_poll_t * signal_poll_hdl;
     sigset_t oldset;
     char master_read_buf[MASTER_READ_BUF_SIZE];
-    char cell_chars[];
+    char * cell_chars;
 } ctx_t;
 
 static void cell_area(
@@ -56,12 +57,9 @@ static void cell_area(
     dst->y2 = offset_y + cell_y2 * CELL_H + (CELL_H - 1);
 }
 
-static void key_cb(lv_event_t * e)
+static void key_handler(ctx_t * ctx, uint32_t key)
 {
     ssize_t rwres;
-
-    ctx_t * ctx = lv_event_get_user_data(e);
-    uint32_t key = *(uint32_t *) lv_event_get_param(e);
 
     char seq[3];
     size_t seq_len;
@@ -78,7 +76,6 @@ static void key_cb(lv_event_t * e)
         case LV_KEY_ENTER:
             seq[0] = '\n';
             seq_len = 1;
-            ctx->click_event_debt++;
             break;
         case LV_KEY_BACKSPACE:
             seq[0] = 127; /* ASCII DEL */
@@ -119,6 +116,18 @@ static void key_cb(lv_event_t * e)
     else {
         assert(rwres == seq_len);
     }
+}
+
+static void key_cb(lv_event_t * e)
+{
+    ctx_t * ctx = lv_event_get_user_data(e);
+    uint32_t key = *(uint32_t *) lv_event_get_param(e);
+
+    if(key == LV_KEY_ENTER) {
+        ctx->click_event_debt++;
+    }
+
+    key_handler(ctx, key);
 }
 
 static void click_cb(lv_event_t * e)
@@ -330,8 +339,7 @@ void signal_poll_cb(mcp_lvgl_poll_t * handle, int fd, uint32_t revents, void * u
     res = sigaddset(&set, SIGCHLD);
     assert(res == 0);
     struct timespec zero_ts = {.tv_sec = 0, .tv_nsec = 0};
-    res = sigtimedwait(&set, NULL, &zero_ts);
-    assert(res == SIGCHLD);
+    sigtimedwait(&set, NULL, &zero_ts);
 
     pid_t wres = waitpid(ctx->pid, NULL, WNOHANG);
 
@@ -351,6 +359,56 @@ void signal_poll_cb(mcp_lvgl_poll_t * handle, int fd, uint32_t revents, void * u
     else assert(0);
 }
 
+static void keyboard_event_cb(lv_event_t * e)
+{
+    lv_keyboard_def_event_cb(e);
+
+    lv_obj_t * kb = lv_event_get_current_target(e);
+    ctx_t * ctx = lv_event_get_user_data(e);
+
+    uint32_t btn_id = lv_buttonmatrix_get_selected_button(kb);
+    if(btn_id == LV_BUTTONMATRIX_BUTTON_NONE) return;
+
+    const char * txt = lv_buttonmatrix_get_button_text(kb, btn_id);
+    if(txt == NULL) return;
+
+    if(txt[0] && !txt[1] && ((txt[0] >= ' ' && txt[0] <= '~'))) {
+        key_handler(ctx, txt[0]);
+    }
+    else if(0 == strcmp(txt, LV_SYMBOL_NEW_LINE)) {
+        key_handler(ctx, LV_KEY_ENTER);
+    }
+    else if(0 == strcmp(txt, LV_SYMBOL_BACKSPACE)) {
+        key_handler(ctx, LV_KEY_BACKSPACE);
+    }
+    else if(0 == strcmp(txt, LV_SYMBOL_OK)) {
+        key_handler(ctx, LV_KEY_ESC);
+    }
+    else if(0 == strcmp(txt, LV_SYMBOL_KEYBOARD) || 0 == strcmp(txt, LV_SYMBOL_CLOSE)) {
+        lv_obj_delete(kb);
+
+        int32_t w = lv_obj_get_width(ctx->term_obj);
+        int32_t h = lv_obj_get_height(ctx->term_obj);
+        uint32_t new_n_cells_y = h / CELL_H;
+
+        ctx->cell_chars = realloc(ctx->cell_chars, ctx->n_cells_x * new_n_cells_y);
+        assert(ctx->cell_chars);
+        memset(ctx->cell_chars + ctx->n_cells_x * ctx->n_cells_y, 0, ctx->n_cells_x * (new_n_cells_y - ctx->n_cells_y));
+
+        struct winsize win = {
+            .ws_row = new_n_cells_y,
+            .ws_col = ctx->n_cells_x,
+            .ws_xpixel = w,
+            .ws_ypixel = h,
+        };
+        ioctl(ctx->slave, TIOCSWINSZ, &win);
+
+        tmt_resize(ctx->term, new_n_cells_y, ctx->n_cells_x);
+
+        ctx->n_cells_y = new_n_cells_y;
+    }
+}
+
 static void base_obj_delete_cb(lv_event_t * e)
 {
     int res;
@@ -364,12 +422,16 @@ static void base_obj_delete_cb(lv_event_t * e)
 
     res = close(ctx->master);
     assert(res == 0);
+    res = close(ctx->slave);
+    assert(res == 0);
 
     res = close(ctx->sfd);
     assert(res == 0);
 
     res = sigprocmask(SIG_SETMASK, &ctx->oldset, NULL);
     assert(res == 0);
+
+    free(ctx->cell_chars);
 
     free(ctx);
 }
@@ -380,23 +442,42 @@ void terminal_app_run(lv_obj_t * base_obj)
 
     lv_obj_t * term_obj = base_obj;
 
+    lv_obj_t * kb = NULL;
+    lv_indev_t * indev = NULL;
+    while((indev = lv_indev_get_next(indev))) {
+        if(lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER) {
+            kb = lv_keyboard_create(base_obj);
+            break;
+        }
+    }
+
     lv_obj_refr_size(term_obj);
     int32_t w = lv_obj_get_width(term_obj);
     int32_t h = lv_obj_get_height(term_obj);
+    if(kb) {
+        lv_obj_refr_size(kb);
+        h -= lv_obj_get_height(kb);
+    }
     uint32_t n_cells_x = w / CELL_W;
     uint32_t n_cells_y = h / CELL_H;
 
-    ctx_t * ctx = calloc(1, sizeof(*ctx) + n_cells_x * n_cells_y);
+    ctx_t * ctx = calloc(1, sizeof(*ctx));
     assert(ctx);
 
     ctx->base_obj = base_obj;
     ctx->term_obj = term_obj;
     ctx->n_cells_x = n_cells_x;
     ctx->n_cells_y = n_cells_y;
+    ctx->cell_chars = calloc(n_cells_x * n_cells_y, 1);
+    assert(ctx->cell_chars);
 
     lv_obj_set_style_bg_color(term_obj, lv_color_hex(BACKGROUND), 0);
 
     lv_obj_add_event_cb(term_obj, key_cb, LV_EVENT_KEY, ctx);
+    if(kb) {
+        lv_obj_remove_event_cb(kb, lv_keyboard_def_event_cb);
+        lv_obj_add_event_cb(kb, keyboard_event_cb, LV_EVENT_VALUE_CHANGED, ctx);
+    }
     lv_obj_add_flag(term_obj, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(term_obj, click_cb, LV_EVENT_CLICKED, ctx);
     lv_obj_add_event_cb(term_obj, draw_end_cb, LV_EVENT_DRAW_MAIN_END, ctx);
@@ -411,27 +492,23 @@ void terminal_app_run(lv_obj_t * base_obj)
         .ws_ypixel = h,
     };
 
-    int slave;
-    res = openpty(&ctx->master, &slave, NULL, NULL, &win);
+    res = openpty(&ctx->master, &ctx->slave, NULL, NULL, &win);
     assert(res == 0);
 
     posix_spawn_file_actions_t file_actions;
     res = posix_spawn_file_actions_init(&file_actions);
     assert(res == 0);
-    res = posix_spawn_file_actions_adddup2(&file_actions, slave, 0);
+    res = posix_spawn_file_actions_adddup2(&file_actions, ctx->slave, 0);
     assert(res == 0);
-    res = posix_spawn_file_actions_adddup2(&file_actions, slave, 1);
+    res = posix_spawn_file_actions_adddup2(&file_actions, ctx->slave, 1);
     assert(res == 0);
-    res = posix_spawn_file_actions_adddup2(&file_actions, slave, 2);
+    res = posix_spawn_file_actions_adddup2(&file_actions, ctx->slave, 2);
     assert(res == 0);
 
     res = posix_spawn(&ctx->pid, "sh", &file_actions, NULL, NULL, NULL);
     assert(res == 0);
 
     res = posix_spawn_file_actions_destroy(&file_actions);
-    assert(res == 0);
-
-    res = close(slave);
     assert(res == 0);
 
     ctx->master_poll_hdl = mcp_lvgl_poll_add(ctx->master, master_poll_cb, EPOLLIN, ctx);
