@@ -12,6 +12,7 @@ const m4_runtime_cb_array_t m4_runtime_lib_unix[] = {
 
     {"o_rdonly", {m4_lit, (void *) (O_RDONLY)}},
     {"o_wronly", {m4_lit, (void *) (O_WRONLY)}},
+    {"o_rdwr", {m4_lit, (void *) (O_RDWR)}},
 
     {NULL}
 };
