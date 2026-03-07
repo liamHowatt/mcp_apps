@@ -107,6 +107,7 @@ CSRCS += bindings/runtime_mcp_lvgl.c
 CSRCS += bindings/runtime_unix.c
 CSRCS += bindings/runtime_malloc.c
 CSRCS += bindings/runtime_mount.c
+CSRCS += bindings/runtime_pppd.c
 
 clean::
 	$(call DELFILE, mcp_forth/mcp_forth_generated.* m4_samples_romfs.img samples_romfs_img.c)

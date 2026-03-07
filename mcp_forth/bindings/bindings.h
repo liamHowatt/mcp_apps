@@ -38,6 +38,13 @@ extern const m4_runtime_cb_array_t m4_runtime_lib_unix[];
 extern const m4_runtime_cb_array_t m4_runtime_lib_malloc[];
 extern const m4_runtime_cb_array_t m4_runtime_lib_mount[];
 
+#ifdef CONFIG_NETUTILS_PPPD
+extern const m4_runtime_cb_array_t m4_runtime_lib_pppd[];
+#define M4_RUNTIME_LIB_ENTRY_PPPD m4_runtime_lib_pppd,
+#else
+#define M4_RUNTIME_LIB_ENTRY_PPPD
+#endif
+
 #define M4_RUNTIME_LIB_MCP_ALL_ENTRIES \
     M4_RUNTIME_LIB_ENTRY_MCPD \
     M4_RUNTIME_LIB_ENTRY_SPI \
@@ -47,4 +54,5 @@ extern const m4_runtime_cb_array_t m4_runtime_lib_mount[];
     m4_runtime_lib_unix, \
     m4_runtime_lib_malloc, \
     m4_runtime_lib_mount, \
+    M4_RUNTIME_LIB_ENTRY_PPPD \
     /* keep this line blank */
