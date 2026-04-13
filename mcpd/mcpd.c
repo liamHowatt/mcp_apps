@@ -113,6 +113,7 @@ static unsigned periph_last_driver(unsigned periph) {
     switch(periph) {
         case MCP_PINS_PERIPH_TYPE_SPI: return MCP_PINS_DRIVER_TYPE_SPI_LAST_;
         case MCP_PINS_PERIPH_TYPE_UART: return MCP_PINS_DRIVER_TYPE_UART_LAST_;
+        case MCP_PINS_PERIPH_TYPE_I2S: return MCP_PINS_DRIVER_TYPE_I2S_LAST_;
     }
     return 0;
 }
@@ -125,6 +126,9 @@ static const char * pins_str(unsigned periph, unsigned driver) {
         }
         case MCP_PINS_PERIPH_TYPE_UART: switch(driver) {
             case MCP_PINS_DRIVER_TYPE_UART_RAW: return "ttyS";
+        }
+        case MCP_PINS_PERIPH_TYPE_I2S: switch(driver) {
+            case MCP_PINS_DRIVER_TYPE_I2S_RAW: return "pcm";
         }
     }
     return NULL;
@@ -1059,6 +1063,7 @@ int mcpd_main(int argc, char *argv[])
                     resp = -MCPD_BAD_REQUEST;
                     if(entry->periph_type == MCP_PINS_PERIPH_TYPE_SPI) { if(req.io_type >= MCP_PINS_PIN_SPI_LAST_) break; }
                     else if(entry->periph_type == MCP_PINS_PERIPH_TYPE_UART) { if(req.io_type >= MCP_PINS_PIN_UART_LAST_) break; }
+                    else if(entry->periph_type == MCP_PINS_PERIPH_TYPE_I2S) { if(req.io_type >= MCP_PINS_PIN_I2S_LAST_) break; }
                     else assert(0);
 
                     const mcp_pins_dsc_t * my_dsc = &entry->pins[req.io_type];

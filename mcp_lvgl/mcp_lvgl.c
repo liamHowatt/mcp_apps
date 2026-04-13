@@ -37,9 +37,7 @@
 #define MQ_MSGSIZE 64
 #define FORTH_DRIVER_MEMORY_SIZE 2048
 
-#define APP_BENCHMARK 1
-
-#if APP_BENCHMARK
+#ifdef CONFIG_LV_USE_DEMO_BENCHMARK
     #include <lvgl/demos/lv_demos.h>
 #endif
 
@@ -111,7 +109,7 @@ static const m4_runtime_cb_array_t runtime_lib_lvgl_common[] = {
     {NULL}
 };
 
-#if APP_BENCHMARK
+#ifdef CONFIG_LV_USE_DEMO_BENCHMARK
 static void benchmark_app_run(lv_obj_t * base_obj)
 {
     lv_obj_add_flag(base_obj, LV_OBJ_FLAG_HIDDEN);
@@ -177,7 +175,7 @@ static void create_app_list(void)
 #ifdef CONFIG_MCP_APPS_TEXTER_UI_DEMO
     app_list_helper(list, "Texter UI Demo", texter_ui_demo_app_run);
 #endif
-#if APP_BENCHMARK
+#ifdef CONFIG_LV_USE_DEMO_BENCHMARK
     app_list_helper(list, "LVGL Benchmark Demo", benchmark_app_run);
 #endif
 #if CONFIG_MCP_APPS_TERMINAL

@@ -187,11 +187,14 @@ const m4_runtime_cb_array_t m4_runtime_lib_mcpd[] = {
     /* resources */
     {"mcp_pins_periph_type_spi", {m4_lit, (void *) MCP_PINS_PERIPH_TYPE_SPI}},
     {"mcp_pins_periph_type_uart", {m4_lit, (void *) MCP_PINS_PERIPH_TYPE_UART}},
+    {"mcp_pins_periph_type_i2s", {m4_lit, (void *) MCP_PINS_PERIPH_TYPE_I2S}},
 
     {"mcp_pins_driver_type_spi_raw", {m4_lit, (void *) MCP_PINS_DRIVER_TYPE_SPI_RAW}},
     {"mcp_pins_driver_type_spi_sdcard", {m4_lit, (void *) MCP_PINS_DRIVER_TYPE_SPI_SDCARD}},
 
     {"mcp_pins_driver_type_uart_raw", {m4_lit, (void *) MCP_PINS_DRIVER_TYPE_UART_RAW}},
+
+    {"mcp_pins_driver_type_i2s_raw", {m4_lit, (void *) MCP_PINS_DRIVER_TYPE_I2S_RAW}},
 
     {"mcp_pins_pin_spi_clk", {m4_lit, (void *) MCP_PINS_PIN_SPI_CLK}},
     {"mcp_pins_pin_spi_miso", {m4_lit, (void *) MCP_PINS_PIN_SPI_MISO}},
@@ -200,6 +203,10 @@ const m4_runtime_cb_array_t m4_runtime_lib_mcpd[] = {
 
     {"mcp_pins_pin_uart_tx", {m4_lit, (void *) MCP_PINS_PIN_UART_TX}},
     {"mcp_pins_pin_uart_rx", {m4_lit, (void *) MCP_PINS_PIN_UART_RX}},
+
+    {"mcp_pins_pin_i2s_bclk", {m4_lit, (void *) MCP_PINS_PIN_I2S_BCLK}},
+    {"mcp_pins_pin_i2s_ws", {m4_lit, (void *) MCP_PINS_PIN_I2S_WS}},
+    {"mcp_pins_pin_i2s_data", {m4_lit, (void *) MCP_PINS_PIN_I2S_DATA}},
 
 
     /*extensions*/

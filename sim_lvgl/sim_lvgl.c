@@ -387,7 +387,7 @@ int main(int argc, FAR char *argv[])
   kbd_create(&kbd);
 #endif
 
-  res = mount("", "/mnt/host", "hostfs", 0, "fs=/root/nuttx_hostfs/");
+  res = mount("", "/mnt/host", "hostfs", 0, "fs=./");
   assert(res == 0);
 
   make_enc_kpd_group();

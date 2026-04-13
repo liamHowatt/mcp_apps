@@ -11,4 +11,10 @@ config MCP_APPS_PEANUT_GB
                 Enable the peanut_gb App
 
 if MCP_APPS_PEANUT_GB
+
+config MCP_APPS_PEANUT_GB_SOUND
+        bool "Sound"
+        default n
+        depends on AUDIO
+
 endif

@@ -1,1 +1,5 @@
 include $(wildcard $(APPDIR)/mcp_apps/*/Make.defs)
+
+# the compiler replaces fprintf with fwrite for which
+# nuttx does not handle line buffering.
+CFLAGS += -fno-builtin-printf -fno-builtin-fprintf -fno-builtin-fputs

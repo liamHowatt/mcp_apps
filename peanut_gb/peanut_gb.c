@@ -1,3 +1,5 @@
+#include <nuttx/config.h>
+
 #include <mcp/peanut_gb.h>
 
 #include <lvgl/lvgl.h>
@@ -11,8 +13,21 @@
 #include <stdbool.h>
 #include <sys/stat.h>
 #include <nuttx/input/keyboard.h>
+#include <dirent.h>
+#include <sys/ioctl.h>
+#include <nuttx/audio/audio.h>
+#include <mqueue.h>
 
+#ifdef CONFIG_MCP_APPS_PEANUT_GB_SOUND
+#include "Peanut-GB/examples/sdl2/minigb_apu/minigb_apu.h"
+#define ENABLE_SOUND 1
+static uint8_t audio_read(uint16_t addr);
+static void audio_write(uint16_t addr, uint8_t val);
+#else
 #define ENABLE_SOUND 0
+#endif /*CONFIG_MCP_APPS_PEANUT_GB_SOUND*/
+
+#define ENABLE_LCD 1
 #include "Peanut-GB/peanut_gb.h"
 
 #define SHARD_COUNT 16
@@ -22,6 +37,17 @@
 #define SCRW 160
 #define SCRH 144
 #define GB_TIMER_PERIOD (1000.0 / VERTICAL_SYNC + 1.0)
+
+#ifdef CONFIG_MCP_APPS_PEANUT_GB_SOUND
+
+#define AUD_MQ_NAME "pgb_aud"
+
+typedef struct {
+    bool in_use;
+    struct ap_buffer_s * apbuf;
+} audio_driver_buf_t;
+
+#endif /*CONFIG_MCP_APPS_PEANUT_GB_SOUND*/
 
 typedef struct {
     lv_obj_t * base_obj;
@@ -40,11 +66,317 @@ typedef struct {
     lv_style_t btn_style;
     struct gb_s gb;
     uint8_t * rom_shards[SHARD_COUNT];
+#ifdef CONFIG_MCP_APPS_PEANUT_GB_SOUND
+    bool aud_working;
+    int aud_fd;
+    mqd_t aud_mq;
+    apb_samp_t adb_act;
+    apb_samp_t adb_rem;
+    apb_samp_t adb_pos;
+    apb_samp_t n_audio_driver_bufs;
+    size_t apu_rem;
+    size_t apu_pos;
+    audio_driver_buf_t * audio_driver_bufs;
+    struct minigb_apu_ctx apu;
+    int16_t apu_sample_buf[AUDIO_SAMPLES_TOTAL];
+#endif
     bool dirty_rows[SCRH];
     uint16_t palette[0x23 + 1];
     uint8_t raw_buf[SCRH][SCRW];
     uint16_t canv_buf[SCRH][SCRW];
 } ctx_t;
+
+#ifdef CONFIG_MCP_APPS_PEANUT_GB_SOUND
+
+static struct minigb_apu_ctx * g_apu_p;
+
+static uint8_t audio_read(uint16_t addr)
+{
+    return minigb_apu_audio_read(g_apu_p, addr);
+}
+
+static void audio_write(uint16_t addr, uint8_t val)
+{
+    minigb_apu_audio_write(g_apu_p, addr, val);
+}
+
+static void setup_sound(ctx_t * ctx)
+{
+    int res;
+    struct audio_caps_s cap;
+    struct audio_buf_desc_s buf_desc;
+
+    DIR * dirp = NULL;
+    ctx->aud_fd = -1;
+    bool device_reserved = false;
+    ctx->aud_mq = (mqd_t) -1;
+    bool mq_registered = false;
+    bool started = false;
+
+    minigb_apu_audio_init(&ctx->apu);
+    g_apu_p = &ctx->apu;
+
+    dirp = opendir("/dev/audio");
+    if(!dirp) {
+        fprintf(stderr, "no \"/dev/audio\" directory\n");
+        goto early_out;
+    }
+
+    while(1) {
+        struct dirent * dirent = readdir(dirp);
+        if(!dirent) {
+            fprintf(stderr, "no suitable audio device in \"/dev/audio\"\n");
+            goto early_out;
+        }
+
+        char * path;
+        res = asprintf(&path, "/dev/audio/%s", dirent->d_name);
+        assert(res >= 0);
+        if(ctx->aud_fd >= 0) close(ctx->aud_fd);
+        ctx->aud_fd = open(path, O_RDWR);
+        free(path);
+        if(ctx->aud_fd < 0) {
+            continue;
+        }
+
+        memset(&cap, 0, sizeof(cap));
+        cap.ac_len = sizeof(cap);
+        cap.ac_type = AUDIO_TYPE_QUERY;
+        cap.ac_subtype = AUDIO_TYPE_QUERY;
+        res = ioctl(ctx->aud_fd, AUDIOIOC_GETCAPS, (unsigned long)&cap);
+        if(res != sizeof(cap)) {
+            continue;
+        }
+
+        if(false == (
+                     ((cap.ac_format.hw & (1 << (AUDIO_FMT_PCM - 1))) != 0) &&
+                     (cap.ac_controls.b[0] & AUDIO_TYPE_OUTPUT)
+                    )) {
+            continue;
+        }
+
+        memset(&cap, 0, sizeof(cap));
+        cap.ac_len = sizeof(cap);
+        cap.ac_type = AUDIO_TYPE_OUTPUT;
+        cap.ac_subtype = AUDIO_TYPE_QUERY;
+        res = ioctl(ctx->aud_fd, AUDIOIOC_GETCAPS, (unsigned long)&cap);
+        if(res != sizeof(cap)) {
+            continue;
+        }
+
+        uint8_t minimum_channels = cap.ac_channels >> 4;
+        if(minimum_channels && minimum_channels > 1) {
+            continue;
+        }
+
+        break;
+    }
+
+    res = ioctl(ctx->aud_fd, AUDIOIOC_RESERVE, 0);
+    if(res < 0) {
+        fprintf(stderr, "failed to reserve the audio device\n");
+        goto early_out;
+    }
+    device_reserved = true;
+
+    struct audio_caps_desc_s cap_desc = {0};
+    cap_desc.caps.ac_len            = sizeof(cap_desc.caps);
+    cap_desc.caps.ac_type           = AUDIO_TYPE_OUTPUT;
+    cap_desc.caps.ac_channels       = 1;
+    cap_desc.caps.ac_chmap          = 0;
+    cap_desc.caps.ac_controls.hw[0] = (uint32_t)AUDIO_SAMPLE_RATE;
+    cap_desc.caps.ac_controls.b[3]  = (uint32_t)AUDIO_SAMPLE_RATE >> 16;
+    cap_desc.caps.ac_controls.b[2]  = 16;
+    cap_desc.caps.ac_subtype        = AUDIO_FMT_PCM;
+    res = ioctl(ctx->aud_fd, AUDIOIOC_CONFIGURE, (unsigned long)&cap_desc);
+    if(res != 0) {
+        fprintf(stderr, "failed to configure the audio device\n");
+        goto early_out;
+    }
+
+    struct ap_buffer_info_s buf_info;
+    res = ioctl(ctx->aud_fd, AUDIOIOC_GETBUFFERINFO, (unsigned long)&buf_info);
+    if(res != 0) {
+        buf_info.nbuffers = 2;
+        buf_info.buffer_size = 8192;
+    }
+    ctx->n_audio_driver_bufs = buf_info.nbuffers;
+
+    struct mq_attr attr = {
+        .mq_maxmsg = buf_info.nbuffers + 8,
+        .mq_msgsize = sizeof(struct audio_msg_s),
+    };
+    /* ideally this would have O_NONBLOCK but drivers count on it being blocking */
+    ctx->aud_mq = mq_open(AUD_MQ_NAME, O_RDWR | O_CREAT | O_EXCL, 0644, &attr);
+    if(ctx->aud_mq == (mqd_t) -1) {
+        fprintf(stderr, "could not create an audio message queue\n");
+        goto early_out;
+    }
+
+    res = ioctl(ctx->aud_fd, AUDIOIOC_REGISTERMQ, (unsigned long)ctx->aud_mq);
+    if(res != 0) {
+        fprintf(stderr, "could not register the audio message queue\n");
+        goto early_out;
+    }
+    mq_registered = true;
+
+    ctx->audio_driver_bufs = calloc(buf_info.nbuffers, sizeof(*ctx->audio_driver_bufs));
+    assert(ctx->audio_driver_bufs);
+
+    for(apb_samp_t i = 0; i < buf_info.nbuffers; i++) {
+        memset(&buf_desc, 0, sizeof(buf_desc));
+        buf_desc.numbytes = buf_info.buffer_size;
+        buf_desc.u.pbuffer = &ctx->audio_driver_bufs[i].apbuf;
+        res = ioctl(ctx->aud_fd, AUDIOIOC_ALLOCBUFFER, (unsigned long)&buf_desc);
+        if(res != sizeof(buf_desc)) {
+            fprintf(stderr, "audio driver could not allocate a buffer\n");
+            ctx->audio_driver_bufs[i].apbuf = NULL;
+            goto early_out;
+        }
+    }
+
+    res = ioctl(ctx->aud_fd, AUDIOIOC_START, 0);
+    if(res != 0) {
+        fprintf(stderr, "could not start the audio device\n");
+        goto early_out;
+    }
+    started = true;
+
+    ctx->aud_working = true;
+
+early_out:
+    if(ctx->aud_working == false) {
+        if(started) ioctl(ctx->aud_fd, AUDIOIOC_STOP, 0);
+        if(ctx->audio_driver_bufs) {
+            for(apb_samp_t i = 0; i < buf_info.nbuffers; i++) {
+                struct ap_buffer_s * apb = ctx->audio_driver_bufs[i].apbuf;
+                if(!apb) break;
+                memset(&buf_desc, 0, sizeof(buf_desc));
+                buf_desc.u.buffer = apb;
+                ioctl(ctx->aud_fd, AUDIOIOC_FREEBUFFER, (unsigned long)&buf_desc);
+            }
+            free(ctx->audio_driver_bufs);
+        }
+        if(mq_registered) ioctl(ctx->aud_fd, AUDIOIOC_UNREGISTERMQ, (unsigned long)ctx->aud_mq);
+        if(device_reserved) ioctl(ctx->aud_fd, AUDIOIOC_RELEASE, 0);
+        if(ctx->aud_fd >= 0) close(ctx->aud_fd);
+        if(ctx->aud_mq != (mqd_t) -1) {
+            mq_close(ctx->aud_mq);
+            res = mq_unlink(AUD_MQ_NAME);
+            assert(res == 0);
+        }
+    }
+
+    if(dirp) closedir(dirp);
+}
+
+static void teardown_sound(ctx_t * ctx)
+{
+    int res;
+
+    if(!ctx->aud_working) return;
+
+    ioctl(ctx->aud_fd, AUDIOIOC_STOP, 0);
+    for(apb_samp_t i = 0; i < ctx->n_audio_driver_bufs; i++) {
+        struct ap_buffer_s * apb = ctx->audio_driver_bufs[i].apbuf;
+        if(!apb) break;
+        struct audio_buf_desc_s buf_desc = {
+            .u.buffer = apb,
+        };
+        ioctl(ctx->aud_fd, AUDIOIOC_FREEBUFFER, (unsigned long)&buf_desc);
+    }
+    free(ctx->audio_driver_bufs);
+    ioctl(ctx->aud_fd, AUDIOIOC_UNREGISTERMQ, (unsigned long)ctx->aud_mq);
+    ioctl(ctx->aud_fd, AUDIOIOC_RELEASE, 0);
+    close(ctx->aud_fd);
+    mq_close(ctx->aud_mq);
+    res = mq_unlink(AUD_MQ_NAME);
+    assert(res == 0);
+}
+
+static void flush_sound(ctx_t * ctx)
+{
+    int res;
+    ssize_t rwres;
+    struct mq_attr attr;
+
+    if(!ctx->aud_working) return;
+
+    res = mq_getattr(ctx->aud_mq, &attr);
+    assert(res == 0);
+    for(long m = 0; m < attr.mq_curmsgs; m++) {
+        struct audio_msg_s msg;
+        rwres = mq_receive(ctx->aud_mq, (char *) &msg, sizeof(msg), NULL);
+        assert(rwres == sizeof(msg));
+        if(msg.msg_id != AUDIO_MSG_DEQUEUE) continue;
+        apb_samp_t i;
+        for(i = 0; i < ctx->n_audio_driver_bufs; i++) {
+            audio_driver_buf_t * adb = &ctx->audio_driver_bufs[i];
+            if(adb->apbuf == msg.u.ptr) {
+                assert(adb->in_use);
+                adb->in_use = false;
+                break;
+            }
+        }
+        assert(i < ctx->n_audio_driver_bufs);
+    }
+
+    while(ctx->apu_rem) {
+        if(ctx->adb_rem) {
+            audio_driver_buf_t * adb = &ctx->audio_driver_bufs[ctx->adb_act];
+            struct ap_buffer_s * apb = adb->apbuf;
+            int16_t * dst = (int16_t *) apb->samp;
+
+            while(ctx->apu_rem && ctx->adb_rem) {
+                dst[ctx->adb_pos++] = (ctx->apu_sample_buf[ctx->apu_pos]
+                                       + ctx->apu_sample_buf[ctx->apu_pos + 1])
+                                      / 2;
+                ctx->adb_rem--;
+                ctx->apu_pos += 2;
+                ctx->apu_rem -= 2;
+            }
+
+            if(ctx->adb_rem == 0) {
+                struct audio_buf_desc_s buf_desc = {
+                    .numbytes = apb->nbytes,
+                    .u.buffer = apb,
+                };
+                res = ioctl(ctx->aud_fd, AUDIOIOC_ENQUEUEBUFFER, (unsigned long)&buf_desc);
+                assert(res >= 0);
+                adb->in_use = true;
+            }
+
+            continue;
+        }
+
+        apb_samp_t i;
+        for(i = 0; i < ctx->n_audio_driver_bufs; i++) {
+            audio_driver_buf_t * adb = &ctx->audio_driver_bufs[i];
+            if(adb->in_use == false) {
+                struct ap_buffer_s * apb = adb->apbuf;
+                assert(apb->nmaxbytes > 0);
+                assert(apb->nmaxbytes % 2 == 0);
+                assert((uintptr_t)apb->samp % 2 == 0);
+
+                ctx->adb_act = i;
+                ctx->adb_rem = apb->nmaxbytes / 2;
+                ctx->adb_pos = 0;
+
+                apb->curbyte = 0;
+                apb->flags = 0;
+                apb->nbytes = apb->nmaxbytes;
+
+                break;
+            }
+        }
+
+        if(!(i < ctx->n_audio_driver_bufs)) {
+            return;
+        }
+    }
+}
+
+#endif /*CONFIG_MCP_APPS_PEANUT_GB_SOUND*/
 
 static void open_menu(ctx_t * ctx);
 
@@ -191,6 +523,13 @@ static void tim_cb(lv_timer_t * tim)
     for(uint32_t i = 0; i < frames_to_run; i++) {
         update_uinput_joypad(ctx);
         gb_run_frame(&ctx->gb);
+#ifdef CONFIG_MCP_APPS_PEANUT_GB_SOUND
+        flush_sound(ctx);
+        minigb_apu_audio_callback(&ctx->apu, ctx->apu_sample_buf);
+        ctx->apu_pos = 0;
+        ctx->apu_rem = AUDIO_SAMPLES_TOTAL;
+        flush_sound(ctx);
+#endif
     }
     if(ctx->screenbuf_dirty) {
         for(uint32_t i = 0; i < SCRH; i++) {
@@ -469,6 +808,10 @@ static void game_file_chosen_cb(lv_event_t * e)
     lv_obj_clean(base_obj);
     lv_obj_set_style_layout(base_obj, LV_LAYOUT_NONE, 0);
 
+#ifdef CONFIG_MCP_APPS_PEANUT_GB_SOUND
+    setup_sound(ctx);
+#endif
+
     enum gb_init_error_e err = gb_init(&ctx->gb,
                                        gb_rom_read,
                                        gb_cart_ram_read,
@@ -535,7 +878,11 @@ static void base_obj_delete_cb(lv_event_t * e)
 {
     lv_obj_t * base_obj = lv_event_get_target_obj(e);;
     ctx_t * ctx = lv_obj_get_user_data(base_obj);
+#ifdef CONFIG_MCP_APPS_PEANUT_GB_SOUND
+    teardown_sound(ctx);
+#endif
     for(uint32_t i = 0; i < SHARD_COUNT; i++) {
+        if(ctx->rom_shards[i] == NULL) break;
         free(ctx->rom_shards[i]);
     }
     free(ctx->cart_ram);
