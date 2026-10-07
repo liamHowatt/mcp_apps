@@ -38,6 +38,14 @@ static void audio_write(uint16_t addr, uint8_t val);
 #define SCRH 144
 #define GB_TIMER_PERIOD (1000.0 / VERTICAL_SYNC + 1.0)
 
+#define PTF(shuffle_flags, triplet_id) (((shuffle_flags) << 5) | (triplet_id))
+// extend g to 6 bits using linear scaling. Bit replication would produce
+// the same result in this case (for 5->6 bits).
+#define FIVEBITRGB_TO_RGB565(r, g, b) ((r << 11) | (((g * 63 + 15) / 31) << 5) | b)
+#define OBP0 0
+#define OBP1 1
+#define BGP  2
+
 #ifdef CONFIG_MCP_APPS_PEANUT_GB_SOUND
 
 #define AUD_MQ_NAME "pgb_aud"
@@ -60,6 +68,7 @@ typedef struct {
     int keypad_fd;
     uint8_t size_val;
     bool screenbuf_dirty;
+    int8_t palette_number;
     uint8_t screen_joypad_mask;
     uint8_t uinput_joypad_mask;
     bool style_is_init;
@@ -85,6 +94,9 @@ typedef struct {
     uint8_t raw_buf[SCRH][SCRW];
     uint16_t canv_buf[SCRH][SCRW];
 } ctx_t;
+
+static uint8_t gb_rom_read(struct gb_s * gb, const uint_fast32_t addr);
+static void open_menu(ctx_t * ctx);
 
 #ifdef CONFIG_MCP_APPS_PEANUT_GB_SOUND
 
@@ -378,7 +390,223 @@ static void flush_sound(ctx_t * ctx)
 
 #endif /*CONFIG_MCP_APPS_PEANUT_GB_SOUND*/
 
-static void open_menu(ctx_t * ctx);
+// All the palette code is from the Game Boy Color boot ROM.
+// In particular, the disassembly at
+// https://codeberg.org/ISSOtm/gb-bootroms/src/commit/e10154ee7962873d9fa7ec02be6a6d4299bad208/src/cgb.asm
+
+static uint8_t title2index(const uint8_t title[16])
+{
+    uint8_t sum = 0;
+
+    for(int i = 0; i < 16; i++) {
+        sum += title[i];
+    }
+
+    static const uint8_t title_checksums[] = {
+        0x00, 0x88, 0x16, 0x36, 0xD1, 0xDB, 0xF2, 0x3C,
+        0x8C, 0x92, 0x3D, 0x5C, 0x58, 0xC9, 0x3E, 0x70,
+        0x1D, 0x59, 0x69, 0x19, 0x35, 0xA8, 0x14, 0xAA,
+        0x75, 0x95, 0x99, 0x34, 0x6F, 0x15, 0xFF, 0x97,
+        0x4B, 0x90, 0x17, 0x10, 0x39, 0xF7, 0xF6, 0xA2,
+        0x49, 0x4E, 0x43, 0x68, 0xE0, 0x8B, 0xF0, 0xCE,
+        0x0C, 0x29, 0xE8, 0xB7, 0x86, 0x9A, 0x52, 0x01,
+        0x9D, 0x71, 0x9C, 0xBD, 0x5D, 0x6D, 0x67, 0x3F,
+        0x6B,
+        // These 14 ambiguous checksums are also discriminated based on the 4th title letter
+        0xB3, 0x46, 0x28, 0xA5, 0xC6, 0xD3, 0x27, 0x61, 0x18, 0x66, 0x6A, 0xBF, 0x0D, 0xF4,
+    };
+
+    const uint8_t * title_checksum_ptr = memchr(
+        title_checksums, sum, sizeof(title_checksums));
+
+    if(title_checksum_ptr == NULL) {
+        return 0;
+    }
+
+    uint8_t index = title_checksum_ptr - title_checksums;
+
+    if(index < 65) {
+        return index;
+    }
+
+    static const uint8_t fourth_letter_table[14+14+1] =
+        "BEFAARBEKEK R-"
+        "URAR INAILICE "
+        "R"
+    ;
+
+    uint8_t fourth_letter = title[3];
+    uint8_t fourth_letters_index = index - 65;
+
+    do {
+        if(fourth_letter == fourth_letter_table[fourth_letters_index]) {
+            return index;
+        }
+
+        index += 14;
+        fourth_letters_index += 14;
+
+    } while(fourth_letters_index < sizeof(fourth_letter_table));
+
+    return 0;
+}
+
+static uint8_t title2ptf(const uint8_t title[16])
+{
+    uint8_t index = title2index(title);
+
+    static const uint8_t pal_triplet_ids_and_flags[] = {
+        PTF(0b011,28), PTF(0b000, 8), PTF(0b000,18), PTF(0b101, 3), PTF(0b101, 2), PTF(0b000, 7), PTF(0b100, 7), PTF(0b010,11),
+        PTF(0b001, 0), PTF(0b000,18), PTF(0b011, 5), PTF(0b101, 8), PTF(0b000,22), PTF(0b101, 9), PTF(0b100, 6), PTF(0b101,17),
+        PTF(0b011, 8), PTF(0b101, 0), PTF(0b100, 7), PTF(0b011, 6), PTF(0b000,18), PTF(0b101, 1), PTF(0b001,16), PTF(0b001,28),
+        PTF(0b000,18), PTF(0b100, 5), PTF(0b000,18), PTF(0b011, 4), PTF(0b000,27), PTF(0b000, 7), PTF(0b000, 6), PTF(0b011,15),
+        PTF(0b011,14), PTF(0b011,14), PTF(0b101,14), PTF(0b101,15), PTF(0b011,15), PTF(0b101,18), PTF(0b101,15), PTF(0b101,18),
+        PTF(0b101, 8), PTF(0b101,11), PTF(0b011,15), PTF(0b101,15), PTF(0b100, 6), PTF(0b101,14), PTF(0b101, 2), PTF(0b101, 2),
+        PTF(0b000,18), PTF(0b101,15), PTF(0b000,19), PTF(0b000,18), PTF(0b101, 1), PTF(0b011,14), PTF(0b101,15), PTF(0b101,15),
+        PTF(0b101,13), PTF(0b000, 6), PTF(0b010,12), PTF(0b011,14), PTF(0b101,15), PTF(0b101,15), PTF(0b000,18), PTF(0b011,28),
+        PTF(0b101,12),
+        // Those correspond to the "ambiguous" checksums, laid out like the letter disambiguation table
+        PTF(0b101, 8), PTF(0b011,10), PTF(0b011,14), PTF(0b000,19), PTF(0b101, 0), PTF(0b001,13), PTF(0b101, 8), PTF(0b001,11), PTF(0b101,12), PTF(0b011, 4), PTF(0b101,12), PTF(0b011,13), PTF(0b100, 7), PTF(0b101,28),
+        PTF(0b011, 0), PTF(0b101,20), PTF(0b000,19), PTF(0b011,18), PTF(0b011,28), PTF(0b101,21), PTF(0b101,14), PTF(0b101,14), PTF(0b011,28), PTF(0b011,28), PTF(0b011, 5), PTF(0b101, 2), PTF(0b011,12), PTF(0b011, 4),
+        PTF(0b100, 5),
+    };
+
+    uint8_t ptf = pal_triplet_ids_and_flags[index];
+    return ptf;
+}
+
+static void ptf2pal(uint8_t ptf, const uint16_t * out_pal[3])
+{
+    uint8_t flags = ptf >> 5;
+    uint8_t triplet_id = ptf & 0x1f;
+
+    static const uint8_t pal_offsets[] = {
+        16*8,   22*8,    8*8,
+        17*8,    4*8,   13*8,
+        27*8+6,  0*8,   14*8,
+        27*8+6,  4*8,   15*8,
+         4*8,    4*8,    7*8,
+
+         4*8,   22*8,   18*8,
+         4*8,   22*8,   20*8,
+        28*8,   22*8,   24*8,
+        19*8,   22*8+6,  9*8,
+        16*8,   28*8,   10*8,
+
+         3*8+6,  3*8+6, 11*8,
+         4*8,   23*8,   28*8,
+        17*8,   22*8,    2*8,
+         4*8,    0*8,    2*8,
+         4*8,   28*8,    3*8,
+
+        28*8,    3*8,    0*8,
+         3*8,   28*8,    4*8,
+        21*8,   28*8,    4*8,
+         3*8,   28*8,    0*8,
+         4*8,    3*8,   27*8,
+
+        25*8,    3*8,   28*8,
+         0*8,   28*8,    8*8,
+         5*8,    5*8,    5*8,
+         3*8,   28*8,   12*8,
+         4*8,    3*8,   28*8,
+
+         0*8,    0*8,    1*8,
+        28*8,    3*8,    6*8,
+        26*8,   26*8,   26*8,
+         4*8,   28*8,   29*8,
+    };
+
+    // This is not stored in the same format as the Game Boy Color
+    // boot ROM. **This table here** is RRRRRGGGGGGBBBBB for LVGL's RGB565
+    // whereas Game Boy Color's boot ROM table has 0BBBBBGGGGGRRRRR (the MSB is always 0).
+    static const uint16_t palettes[] = {
+        FIVEBITRGB_TO_RGB565(0x1F,0x1F,0x1F), FIVEBITRGB_TO_RGB565(0x1F,0x15,0x0C), FIVEBITRGB_TO_RGB565(0x10,0x06,0x00), FIVEBITRGB_TO_RGB565(0x00,0x00,0x00),
+        FIVEBITRGB_TO_RGB565(0x1F,0x1C,0x18), FIVEBITRGB_TO_RGB565(0x19,0x13,0x10), FIVEBITRGB_TO_RGB565(0x10,0x0D,0x05), FIVEBITRGB_TO_RGB565(0x0B,0x06,0x01),
+        FIVEBITRGB_TO_RGB565(0x1F,0x1F,0x1F), FIVEBITRGB_TO_RGB565(0x11,0x11,0x1B), FIVEBITRGB_TO_RGB565(0x0A,0x0A,0x11), FIVEBITRGB_TO_RGB565(0x00,0x00,0x00),
+        FIVEBITRGB_TO_RGB565(0x1F,0x1F,0x1F), FIVEBITRGB_TO_RGB565(0x0F,0x1F,0x06), FIVEBITRGB_TO_RGB565(0x00,0x10,0x00), FIVEBITRGB_TO_RGB565(0x00,0x00,0x00),
+        FIVEBITRGB_TO_RGB565(0x1F,0x1F,0x1F), FIVEBITRGB_TO_RGB565(0x1F,0x10,0x10), FIVEBITRGB_TO_RGB565(0x12,0x07,0x07), FIVEBITRGB_TO_RGB565(0x00,0x00,0x00),
+
+        FIVEBITRGB_TO_RGB565(0x1F,0x1F,0x1F), FIVEBITRGB_TO_RGB565(0x14,0x14,0x14), FIVEBITRGB_TO_RGB565(0x0A,0x0A,0x0A), FIVEBITRGB_TO_RGB565(0x00,0x00,0x00),
+        FIVEBITRGB_TO_RGB565(0x1F,0x1F,0x1F), FIVEBITRGB_TO_RGB565(0x1F,0x1F,0x00), FIVEBITRGB_TO_RGB565(0x0F,0x09,0x00), FIVEBITRGB_TO_RGB565(0x00,0x00,0x00),
+        FIVEBITRGB_TO_RGB565(0x1F,0x1F,0x1F), FIVEBITRGB_TO_RGB565(0x0F,0x1F,0x00), FIVEBITRGB_TO_RGB565(0x16,0x0E,0x00), FIVEBITRGB_TO_RGB565(0x00,0x00,0x00),
+        FIVEBITRGB_TO_RGB565(0x1F,0x1F,0x1F), FIVEBITRGB_TO_RGB565(0x15,0x15,0x10), FIVEBITRGB_TO_RGB565(0x08,0x0E,0x0F), FIVEBITRGB_TO_RGB565(0x00,0x00,0x00),
+        FIVEBITRGB_TO_RGB565(0x14,0x13,0x1F), FIVEBITRGB_TO_RGB565(0x1F,0x1F,0x00), FIVEBITRGB_TO_RGB565(0x00,0x0C,0x00), FIVEBITRGB_TO_RGB565(0x00,0x00,0x00),
+
+        FIVEBITRGB_TO_RGB565(0x1F,0x1F,0x19), FIVEBITRGB_TO_RGB565(0x0C,0x1D,0x1D), FIVEBITRGB_TO_RGB565(0x13,0x10,0x06), FIVEBITRGB_TO_RGB565(0x0B,0x0B,0x0B),
+        FIVEBITRGB_TO_RGB565(0x16,0x16,0x1F), FIVEBITRGB_TO_RGB565(0x1F,0x1F,0x12), FIVEBITRGB_TO_RGB565(0x15,0x0B,0x08), FIVEBITRGB_TO_RGB565(0x00,0x00,0x00),
+        FIVEBITRGB_TO_RGB565(0x1F,0x1F,0x14), FIVEBITRGB_TO_RGB565(0x1F,0x12,0x12), FIVEBITRGB_TO_RGB565(0x12,0x12,0x1F), FIVEBITRGB_TO_RGB565(0x00,0x00,0x00),
+        FIVEBITRGB_TO_RGB565(0x1F,0x1F,0x13), FIVEBITRGB_TO_RGB565(0x12,0x16,0x1F), FIVEBITRGB_TO_RGB565(0x0C,0x12,0x0E), FIVEBITRGB_TO_RGB565(0x00,0x07,0x07),
+        FIVEBITRGB_TO_RGB565(0x0D,0x1F,0x00), FIVEBITRGB_TO_RGB565(0x1F,0x1F,0x1F), FIVEBITRGB_TO_RGB565(0x1F,0x0A,0x09), FIVEBITRGB_TO_RGB565(0x00,0x00,0x00),
+
+        FIVEBITRGB_TO_RGB565(0x0A,0x1B,0x00), FIVEBITRGB_TO_RGB565(0x1F,0x10,0x00), FIVEBITRGB_TO_RGB565(0x1F,0x1F,0x00), FIVEBITRGB_TO_RGB565(0x1F,0x1F,0x1F),
+        FIVEBITRGB_TO_RGB565(0x1F,0x1F,0x1F), FIVEBITRGB_TO_RGB565(0x1F,0x0E,0x00), FIVEBITRGB_TO_RGB565(0x12,0x08,0x00), FIVEBITRGB_TO_RGB565(0x00,0x00,0x00),
+        FIVEBITRGB_TO_RGB565(0x1F,0x18,0x08), FIVEBITRGB_TO_RGB565(0x1F,0x1A,0x00), FIVEBITRGB_TO_RGB565(0x12,0x07,0x00), FIVEBITRGB_TO_RGB565(0x09,0x00,0x00),
+        FIVEBITRGB_TO_RGB565(0x1F,0x1F,0x1F), FIVEBITRGB_TO_RGB565(0x0A,0x1F,0x00), FIVEBITRGB_TO_RGB565(0x1F,0x08,0x00), FIVEBITRGB_TO_RGB565(0x00,0x00,0x00),
+        FIVEBITRGB_TO_RGB565(0x1F,0x0C,0x0A), FIVEBITRGB_TO_RGB565(0x1A,0x00,0x00), FIVEBITRGB_TO_RGB565(0x0C,0x00,0x00), FIVEBITRGB_TO_RGB565(0x00,0x00,0x00),
+
+        FIVEBITRGB_TO_RGB565(0x1F,0x1F,0x1F), FIVEBITRGB_TO_RGB565(0x1F,0x13,0x00), FIVEBITRGB_TO_RGB565(0x1F,0x00,0x00), FIVEBITRGB_TO_RGB565(0x00,0x00,0x00),
+        FIVEBITRGB_TO_RGB565(0x1F,0x1F,0x1F), FIVEBITRGB_TO_RGB565(0x00,0x1F,0x00), FIVEBITRGB_TO_RGB565(0x06,0x10,0x00), FIVEBITRGB_TO_RGB565(0x00,0x09,0x00),
+        FIVEBITRGB_TO_RGB565(0x1F,0x1F,0x1F), FIVEBITRGB_TO_RGB565(0x0B,0x17,0x1F), FIVEBITRGB_TO_RGB565(0x1F,0x00,0x00), FIVEBITRGB_TO_RGB565(0x00,0x00,0x1F),
+        FIVEBITRGB_TO_RGB565(0x1F,0x1F,0x1F), FIVEBITRGB_TO_RGB565(0x1F,0x1F,0x0F), FIVEBITRGB_TO_RGB565(0x00,0x10,0x1F), FIVEBITRGB_TO_RGB565(0x1F,0x00,0x00),
+        FIVEBITRGB_TO_RGB565(0x1F,0x1F,0x1F), FIVEBITRGB_TO_RGB565(0x1F,0x1F,0x00), FIVEBITRGB_TO_RGB565(0x1F,0x00,0x00), FIVEBITRGB_TO_RGB565(0x00,0x00,0x00),
+
+        FIVEBITRGB_TO_RGB565(0x1F,0x1F,0x00), FIVEBITRGB_TO_RGB565(0x1F,0x00,0x00), FIVEBITRGB_TO_RGB565(0x0C,0x00,0x00), FIVEBITRGB_TO_RGB565(0x00,0x00,0x00),
+        FIVEBITRGB_TO_RGB565(0x1F,0x1F,0x1F), FIVEBITRGB_TO_RGB565(0x1F,0x19,0x00), FIVEBITRGB_TO_RGB565(0x13,0x0C,0x00), FIVEBITRGB_TO_RGB565(0x00,0x00,0x00),
+        FIVEBITRGB_TO_RGB565(0x00,0x00,0x00), FIVEBITRGB_TO_RGB565(0x00,0x10,0x10), FIVEBITRGB_TO_RGB565(0x1F,0x1B,0x00), FIVEBITRGB_TO_RGB565(0x1F,0x1F,0x1F),
+        FIVEBITRGB_TO_RGB565(0x1F,0x1F,0x1F), FIVEBITRGB_TO_RGB565(0x0C,0x14,0x1F), FIVEBITRGB_TO_RGB565(0x00,0x00,0x1F), FIVEBITRGB_TO_RGB565(0x00,0x00,0x00),
+        FIVEBITRGB_TO_RGB565(0x1F,0x1F,0x1F), FIVEBITRGB_TO_RGB565(0x0F,0x1F,0x06), FIVEBITRGB_TO_RGB565(0x00,0x0C,0x18), FIVEBITRGB_TO_RGB565(0x00,0x00,0x00),
+    };
+
+    const uint8_t * ofs = &pal_offsets[triplet_id * 3];
+    // divide by 2 to undo the *2 C does for the 16-bit array type.
+    const uint16_t * obp0 = &palettes[ofs[OBP0] / 2];
+    const uint16_t * obp1 = &palettes[ofs[OBP1] / 2];
+    const uint16_t * bgp  = &palettes[ofs[BGP ] / 2];
+
+    if(flags & 0b001) {
+        out_pal[OBP0] = obp0;
+    } else {
+        out_pal[OBP0] = bgp;
+    }
+
+    if(flags & 0b100) {
+        out_pal[OBP1] = obp1;
+    } else if(flags & 0b010) {
+        out_pal[OBP1] = obp0;
+    } else {
+        out_pal[OBP1] = bgp;
+    }
+
+    out_pal[BGP] = bgp;
+}
+
+static void title2pal(const uint8_t title[16], const uint16_t * out_pal[3])
+{
+    uint8_t ptf = title2ptf(title);
+    ptf2pal(ptf, out_pal);
+}
+
+static void apply_palette(uint16_t dest_lut[0x23 + 1], const uint16_t * const src[3])
+{
+    for(uint32_t layer_i = 0; layer_i < 3; layer_i++) {
+        for(uint32_t shade_i = 0; shade_i < 4; shade_i++) {
+            dest_lut[(layer_i << 4) | shade_i] = src[layer_i][shade_i];
+        }
+    }
+}
+
+static void set_automatic_palette(ctx_t * ctx)
+{
+    uint8_t title[16];
+    for(uint32_t i = 0; i < sizeof(title); i++) {
+        title[i] = gb_rom_read(&ctx->gb, 0x0134 + i);
+    }
+    const uint16_t * palette[3];
+    title2pal(title, palette);
+    apply_palette(ctx->palette, palette);
+    ctx->palette_number = -1;
+}
 
 static uint8_t gb_rom_read(struct gb_s * gb, const uint_fast32_t addr)
 {
@@ -670,6 +898,38 @@ static void resize_cb(lv_event_t * e)
     }
 }
 
+static void palette_cb(lv_event_t * e)
+{
+    ctx_t * ctx = lv_event_get_user_data(e);
+
+    static const uint8_t pal_triplet_ids_and_flags_manual[] = {
+        PTF(0b000,18),
+        PTF(0b101,16),
+        PTF(0b011,25),
+        PTF(0b101,24),
+        PTF(0b101,13),
+        PTF(0b000,22),
+        PTF(0b000,23),
+        PTF(0b000, 7),
+        PTF(0b101,26),
+        PTF(0b000, 5),
+        PTF(0b011,28),
+        PTF(0b000,19),
+    };
+
+    int8_t palette_number = ++ctx->palette_number;
+
+    if(palette_number < sizeof(pal_triplet_ids_and_flags_manual)) {
+        uint8_t ptf = pal_triplet_ids_and_flags_manual[palette_number];
+        const uint16_t * palette[3];
+        ptf2pal(ptf, palette);
+        apply_palette(ctx->palette, palette);
+    }
+    else {
+        set_automatic_palette(ctx);
+    }
+}
+
 static void quit_cb(lv_event_t * e)
 {
     ctx_t * ctx = lv_event_get_user_data(e);
@@ -701,6 +961,10 @@ static void open_menu(ctx_t * ctx)
     btn = lv_list_add_button(menu, LV_SYMBOL_IMAGE, "Resize");
     lv_group_remove_obj(btn);
     lv_obj_add_event_cb(btn, resize_cb, LV_EVENT_CLICKED, ctx);
+
+    btn = lv_list_add_button(menu, LV_SYMBOL_EYE_OPEN, "Palette");
+    lv_group_remove_obj(btn);
+    lv_obj_add_event_cb(btn, palette_cb, LV_EVENT_CLICKED, ctx);
 
     btn = lv_list_add_button(menu, LV_SYMBOL_POWER, "Quit");
     lv_group_remove_obj(btn);
@@ -847,13 +1111,6 @@ static void game_file_chosen_cb(lv_event_t * e)
     lv_image_set_inner_align(canv, LV_IMAGE_ALIGN_TOP_MID);
     lv_obj_set_size(canv, LV_PCT(100), LV_PCT(100));
     lv_canvas_set_buffer(canv, ctx->canv_buf, SCRW, SCRH, LV_COLOR_FORMAT_RGB565);
-    for(uint32_t shade_i = 0; shade_i < 4; shade_i++) {
-        uint8_t gray_value = (3 - shade_i) * 255 / 3;
-        lv_color_t color_value = {.red=gray_value, .green=gray_value, .blue=gray_value};
-        for(uint32_t layer_i = 0; layer_i < 3; layer_i++) {
-            ctx->palette[(layer_i << 4) | shade_i] = lv_color_to_u16(color_value);
-        }
-    }
 
     ctx->keypad_fd = open("/dev/ukeyboard", O_RDONLY | O_NONBLOCK);
     assert(ctx->keypad_fd >= 0 || errno == ENOENT);
@@ -869,6 +1126,9 @@ static void game_file_chosen_cb(lv_event_t * e)
     ctx->first_tick = lv_tick_get();
     ctx->frame_count = 1;
     ctx->canv = canv;
+
+    set_automatic_palette(ctx);
+
     update_uinput_joypad(ctx);
     gb_run_frame(&ctx->gb);
     ctx->timer = lv_timer_create(tim_cb, GB_TIMER_PERIOD, ctx);
