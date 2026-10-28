@@ -30,6 +30,9 @@
 #ifdef CONFIG_MCP_APPS_TERMINAL
 #include <mcp/terminal.h>
 #endif
+#ifdef CONFIG_MCP_APPS_XKCD
+#include <mcp/xkcd.h>
+#endif
 
 #include <lvgl/lvgl.h>
 #include <lvgl/src/core/lv_global.h>
@@ -180,6 +183,9 @@ static void create_app_list(void)
 #endif
 #if CONFIG_MCP_APPS_TERMINAL
     app_list_helper(list, "Terminal", terminal_app_run);
+#endif
+#if CONFIG_MCP_APPS_XKCD
+    app_list_helper(list, "XKCD", xkcd_app_run);
 #endif
     for(int i = 0; i < ud->app_count; i++) {
         add_entry_to_app_list_obj(list, &ud->app_entries[i]);

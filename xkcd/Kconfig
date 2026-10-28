@@ -1,0 +1,19 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config MCP_APPS_XKCD
+	bool "XKCD App"
+	default n
+	depends on GRAPHICS_LVGL && NETUTILS_WEBCLIENT && MCP_APPS_MCP_TLS && MCP_APPS_LIBPNG && NETUTILS_CJSON
+	---help---
+		Enable the XKCD App
+
+if MCP_APPS_XKCD
+
+config MCP_APPS_XKCD_NETWORKING_THREAD_STACKSIZE
+        int "XKCD networking thread stack size"
+        default PTHREAD_STACK_DEFAULT
+
+endif

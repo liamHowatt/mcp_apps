@@ -34,6 +34,9 @@
 #ifdef CONFIG_MCP_APPS_TERMINAL
 #include <mcp/terminal.h>
 #endif
+#ifdef CONFIG_MCP_APPS_XKCD
+#include <mcp/xkcd.h>
+#endif
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -423,6 +426,11 @@ int main(int argc, FAR char *argv[])
   btn = lv_list_add_button(list, NULL, "Terminal");
   lv_group_remove_obj(btn);
   lv_obj_add_event_cb(btn, app_clicked_cb, LV_EVENT_CLICKED, terminal_app_run);
+#endif
+#ifdef CONFIG_MCP_APPS_XKCD
+  btn = lv_list_add_button(list, NULL, "XKCD");
+  lv_group_remove_obj(btn);
+  lv_obj_add_event_cb(btn, app_clicked_cb, LV_EVENT_CLICKED, xkcd_app_run);
 #endif
 
 #ifdef CONFIG_LV_USE_NUTTX_LIBUV

@@ -4311,6 +4311,7 @@ static void * thread(void * arg)
     https_conn_deinit(&t->https_conn[1]);
     https_conn_deinit(&t->https_conn[0]);
     https_ctx_deinit(&t->https_ctx);
+    assert(SSL_SUCCESS == wolfSSL_Cleanup());
     assert(0 == close(t->rng_fd));
 
     return NULL;

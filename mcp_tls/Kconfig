@@ -1,0 +1,14 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config MCP_APPS_MCP_TLS
+	bool "MCP TLS App"
+	default n
+	depends on CRYPTO_WOLFSSL
+	---help---
+		Enable the MCP TLS App
+
+if MCP_APPS_MCP_TLS
+endif

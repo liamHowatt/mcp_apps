@@ -1,0 +1,5 @@
+ifneq ($(CONFIG_MCP_APPS_LIBPNG),)
+CONFIGURED_APPS += $(APPDIR)/mcp_apps/libpng
+CFLAGS += ${INCDIR_PREFIX}${APPDIR}/mcp_apps/libpng/include
+CXXFLAGS += ${INCDIR_PREFIX}${APPDIR}/mcp_apps/libpng/include
+endif

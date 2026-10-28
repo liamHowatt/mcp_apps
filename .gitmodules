@@ -16,3 +16,6 @@
 [submodule "terminal/libtmt"]
 	path = terminal/libtmt
 	url = https://github.com/deadpixi/libtmt.git
+[submodule "libpng/libpng"]
+	path = libpng/libpng
+	url = git://git.code.sf.net/p/libpng/code

@@ -1,0 +1,14 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config MCP_APPS_LIBPNG
+	bool "libpng"
+	default n
+	depends on LIB_ZLIB
+	---help---
+		Enable the libpng PNG codec library
+
+if MCP_APPS_LIBPNG
+endif
